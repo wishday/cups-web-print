@@ -25,6 +25,11 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 # 第二阶段：运行阶段
 FROM ubuntu:22.04
 
+# 只安装 cups 服务（确保启动脚本完整）
+RUN apt-get update && apt-get install -y --no-install-recommends cups cups-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# 其他所有软件（libreoffice, pdftk, python 包等）从 builder 复制
 COPY --from=builder /usr/lib /usr/lib
 COPY --from=builder /usr/bin /usr/bin
 COPY --from=builder /usr/share /usr/share
