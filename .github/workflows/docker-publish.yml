@@ -1,4 +1,4 @@
-name: ci
+name: ci-docker-publish
 
 on:
   # 自动触发：推送 main 分支或版本标签
