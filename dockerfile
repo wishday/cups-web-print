@@ -42,10 +42,14 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 # 5. 复制项目源代码
 COPY . .
 
-# 6. 暴露端口 FLASK服务和CUPS
+# 6. 暴露端口 FLASK服务和CUPS，声明cups持久化路径
 EXPOSE 5000
 EXPOSE 631
+VOLUME ["/etc/cups"]
+VOLUME ["/var/spool/cups"]
 
 
 # 7. 启动服务：先启动 CUPS，再运行 Flask 应用
-CMD service cups start && python3 app.py
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+CMD ["/entrypoint.sh"]
