@@ -5,15 +5,18 @@ set -e
 /usr/sbin/cupsd -f &
 CUPS_PID=$!
 
-# 等待 CUPS 完全就绪（最长等待30秒）
+# 等待 CUPS 完全就绪（最长等待30秒，使用退出码检查，兼容中英文）
 echo "Waiting for CUPS to be ready..."
 for i in {1..30}; do
-    if lpstat -r 2>/dev/null | grep -q "scheduler is running"; then
+    if lpstat -r >/dev/null 2>&1; then
         echo "CUPS is ready."
         break
     fi
     if [ $i -eq 30 ]; then
         echo "Timeout waiting for CUPS to start." >&2
+        # 可选：输出调试信息
+        echo "CUPS process status:"
+        ps aux | grep cupsd || true
         exit 1
     fi
     sleep 1
