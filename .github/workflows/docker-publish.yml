@@ -1,0 +1,100 @@
+name: ci
+
+on:
+  # 自动触发：推送 main 分支或版本标签
+  push:
+    branches: [ "main" ]
+    tags: [ 'v*.*.*' ]
+  # 自动触发：拉取请求到 main 分支
+  pull_request:
+    branches: [ "main" ]
+  # 手动触发：允许自定义镜像标签和构建平台
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: '自定义镜像标签（留空则使用默认标签）'
+        required: false
+        type: string
+        default: ''
+      platforms:
+        description: '目标平台（逗号分隔，例如：linux/amd64,linux/arm64）'
+        required: false
+        type: string
+        default: 'linux/amd64,linux/arm64'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6  
+
+      # 启用 QEMU 模拟，用于构建非原生架构（如 arm64 在 amd64 runner 上）
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4  
+
+      # 设置 Docker Buildx，支持多平台构建
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4 
+        with:
+          driver: docker-container
+          platforms: linux/amd64,linux/arm64
+
+      # 登录到 GHCR
+      - name: Log in to GHCR
+        uses: docker/login-action@v4 
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 生成镜像元数据（标签、注解等）
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v6  
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # 默认标签：latest（始终存在）
+            type=raw,value=latest
+            # Git 分支名
+            type=ref,event=branch
+            # Git 提交 SHA（短格式）
+            type=sha,format=short
+            # 如果是拉取请求，生成 pr-XXX 标签
+            type=ref,event=pr
+            # 如果是版本标签（v1.2.3），生成 semver 标签
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            # 手动触发时，如果提供了自定义标签，则添加该标签
+            ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.image_tag != '' && format('type=raw,value={0}', github.event.inputs.image_tag) || '' }}
+
+      # 构建并推送多平台镜像
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v7  
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # 平台：手动触发时允许用户覆盖，否则使用默认双平台
+          platforms: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.platforms || 'linux/amd64,linux/arm64' }}
+
+      # （可选）将镜像设置为公开，方便任何人拉取
+      - name: Make image public (optional)
+        if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+        run: |
+          curl -X PATCH \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/user/packages/container/${{ env.IMAGE_NAME }}/visibility \
+            -d '{"visibility":"public"}'
