@@ -66,8 +66,38 @@
 - **PDF 处理**: poppler-utils (pdftoppm), pdftk
 - **IPP 协议**: ipptool (cups-client)
 
+## 部署指导-容器安装(推荐)
+### 1. 部署容器
+```bash
+# 特权模式为usb打印机需要，如使仅使用网络打印机可以去除usb挂载和特权模式
 
-## 部署指导
+docker run -d \
+  --name cups-web-print \
+  --hostname=cups-web-print \
+  --restart unless-stopped \
+  --privileged \
+  -p 5000:5000 \
+  -p 631:631 \
+  -v /var/run/dbus:/var/run/dbus \
+  -v /dev/bus/usb:/dev/bus/usb \
+  -v cups-etc:/etc/cups \
+  -v cups-spool:/var/spool/cups \
+  -v cups-log:/var/log/cups \
+  -v cups-uploads:/app/uploads \
+  -v cups-previews:/app/previews \
+  ghcr.io/wishday/cups-web-print:latest
+```
+
+### 2. 添加cups打印机
+#### 以网络打印机为例，其他打印机手动进入容器，参考cups官方文档操作
+```bash
+# 建议打印机固定ip，避免复杂mDNS解析
+docker exec cups-web-print lpadmin -p Canon_G3881 -v ipp://192.168.1.16:631/ipp/print -m everywhere -E
+```
+### 3. 使用 Web 界面
+####打开浏览器访问 `http://localhost:5000`，局域网内设备访问 `http://cups服务器ip:5000`
+
+## 部署指导-本地安装
 
 ### 1. 下载源代码
 
