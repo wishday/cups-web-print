@@ -404,7 +404,7 @@ docker exec cups-web-print lpadmin -p Canon_G3881 -v ipp://192.168.1.16:631/ipp/
 
 ### 3. Use the Web Interface
 
-#### Open a browser and visit http://localhost:5000. For devices on the local network, visit http://<cups-server-ip>:5000
+#### Open a browser and visit http://localhost:5000. For devices on the local network, visit http://cups-server-ip:5000
 
 ## Deployment Guide-Local Installation
 
