@@ -24,7 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # 刷新字体缓存（让系统立即识别新字体）
 RUN fc-cache -fv
 
-# ========== 新增：备份默认 CUPS 配置 ==========
+# ========== 备份默认 CUPS 配置 ==========
 RUN cp -r /etc/cups /etc/cups-default
 
 # 安装 Python 依赖（只有 Flask 和 Werkzeug，无需编译）
