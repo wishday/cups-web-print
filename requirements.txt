@@ -3,3 +3,6 @@
 # Web 框架
 Flask>=3.0.0
 Werkzeug>=3.0.1
+
+# 图片转 PDF（无损，JPEG/PNG/GIF/BMP/TIFF 直接嵌入 PDF 流）
+img2pdf>=0.1.0

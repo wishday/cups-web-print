@@ -10,6 +10,8 @@ __pycache__/
 
 # Editor settings
 .qwen/
+.claude/
+.opencode/
 
 # Uploaded and preview files (keep directory structure)
 uploads/*

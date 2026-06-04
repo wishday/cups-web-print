@@ -34,7 +34,7 @@
         }
         @media (min-width: 1024px) {
             .left-column {
-                width: 520px;
+                width: 674px;
                 flex-shrink: 0;
             }
         }
@@ -66,17 +66,12 @@
             cursor: pointer;
         }
         
-        /* 页码指示器 */
-        .page-indicator {
-            user-select: none;
-            pointer-events: none;
-        }
     </style>
 </head>
 <body class="bg-gray-50 min-h-screen">
     <!-- Language Switcher -->
     <div style="position:fixed;top:16px;right:16px;z-index:9999;">
-        <a href="/zh" id="currentLang" style="padding:6px 12px;margin-right:4px;border-radius:4px;background:#e5e7eb;color:#374151;text-decoration:none;font-size:14px;">中文</a>
+        <a href="/zh" style="padding:6px 12px;margin-right:4px;border-radius:4px;background:#e5e7eb;color:#374151;text-decoration:none;font-size:14px;">中文</a>
         <a href="/en" style="padding:6px 12px;background:#3b82f6;color:white;border-radius:4px;text-decoration:none;font-size:14px;">English</a>
     </div>
 
@@ -92,7 +87,7 @@
                 <div class="bg-white rounded-xl shadow-md p-6">
                     <h2 class="text-xl font-semibold text-gray-800 mb-4">📁 File Preview & Upload</h2>
                     
-                    <div id="uploadPreviewContainer" class="upload-area rounded-lg overflow-hidden relative" style="min-height: 450px;">
+                    <div id="uploadPreviewContainer" class="upload-area rounded-lg overflow-y-auto relative" style="min-height: 450px;">
                         <!-- 上传状态 -->
                         <div id="uploadState" class="absolute inset-0 flex flex-col items-center justify-center cursor-pointer p-8">
                             <svg class="h-20 w-20 text-gray-300 mb-4" fill="none" viewBox="0 0 48 48" stroke="currentColor">
@@ -106,8 +101,8 @@
                         </div>
 
                         <!-- 预览状态 -->
-                        <div id="previewState" class="absolute inset-0 hidden">
-                            <div class="bg-gray-800 text-white px-4 py-3 flex items-center justify-between gap-3">
+                        <div id="previewState" class="absolute inset-0 hidden flex flex-col overflow-hidden">
+                            <div class="bg-gray-800 text-white px-4 py-3 flex items-center justify-between gap-3 flex-shrink-0">
                                 <div class="flex items-center gap-3 min-w-0 flex-1">
                                     <span id="previewFileName" class="truncate break-all"></span>
                                     <span id="previewFileSize" class="text-xs text-gray-400 flex-shrink-0"></span>
@@ -121,7 +116,20 @@
                                     </button>
                                 </div>
                             </div>
-                            <div id="previewContent" class="bg-gray-50 p-2 relative" style="height: 400px;"></div>
+                            <div id="previewContent" class="flex-1 overflow-y-auto min-h-0 bg-gray-50 p-2 relative"></div>
+                        </div>
+
+                        <!-- upload progress -->
+                        <div id="uploadProgress" class="absolute inset-0 flex flex-col items-center justify-center p-8" style="display: none; z-index: 10;">
+                            <div class="w-full max-w-xs mx-auto">
+                                <div class="flex items-center justify-between text-sm text-gray-600 mb-2">
+                                    <span id="progressText">Uploading...</span>
+                                    <span id="progressPercent">0%</span>
+                                </div>
+                                <div class="bg-gray-200 rounded-full h-3 overflow-hidden">
+                                    <div id="progressBar" class="bg-blue-500 h-3 rounded-full transition-all duration-300 ease-out" style="width: 0%"></div>
+                                </div>
+                            </div>
                         </div>
 
                         <input type="file" id="fileInput" style="display:none;">
@@ -336,7 +344,7 @@
                     </div>
                     
                     <!-- 打印机队列信息 -->
-                    <div id="printerQueueSection" class="mt-4 pt-4 border-t border-gray-200">
+                    <div class="mt-4 pt-4 border-t border-gray-200">
                         <h3 class="text-lg font-semibold text-gray-800 mb-3 flex items-center">
                             <svg class="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/>
@@ -349,7 +357,7 @@
                     </div>
 
                     <!-- 纸盒信息 -->
-                    <div id="printerTraySection" class="mt-4 pt-4 border-t border-gray-200">
+                    <div class="mt-4 pt-4 border-t border-gray-200">
                         <h3 class="text-lg font-semibold text-gray-800 mb-3 flex items-center">
                             <svg class="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/>
@@ -362,7 +370,7 @@
                     </div>
 
                     <!-- 墨盒信息 -->
-                    <div id="printerInkSection" class="mt-4 pt-4 border-t border-gray-200">
+                    <div class="mt-4 pt-4 border-t border-gray-200">
                         <h3 class="text-lg font-semibold text-gray-800 mb-3 flex items-center">
                             <svg class="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01"/>
@@ -375,7 +383,7 @@
                     </div>
 
                     <!-- 打印机状态 -->
-                    <div id="printerInfoSection" class="mt-4 pt-4 border-t border-gray-200">
+                    <div class="mt-4 pt-4 border-t border-gray-200">
                         <h3 class="text-lg font-semibold text-gray-800 mb-3 flex items-center">
                             <svg class="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
@@ -395,6 +403,7 @@
 
     <script>
         let uploadedFile = null;
+        let currentUploadXhr = null;
         let jobs = [];
 
         // 页面范围验证函数
@@ -517,6 +526,8 @@
                     if (previewState) previewState.classList.add('hidden');
                     const previewContent = document.getElementById('previewContent');
                     if (previewContent) previewContent.innerHTML = '';
+                    const container = document.getElementById('uploadPreviewContainer');
+                    if (container) container.style.minHeight = '450px';
                     updatePrintButton();
                 });
             }
@@ -605,50 +616,132 @@
         });
 
 
+        function resetUploadUI() {
+            const uploadProgress = document.getElementById('uploadProgress');
+            const uploadState = document.getElementById('uploadState');
+            if (uploadProgress) uploadProgress.style.display = 'none';
+            if (uploadState) uploadState.classList.remove('hidden');
+            const container = document.getElementById('uploadPreviewContainer');
+            if (container) container.style.minHeight = '450px';
+        }
+
         async function handleFile(file) {
+            if (currentUploadXhr) {
+                currentUploadXhr.abort();
+                currentUploadXhr = null;
+            }
+
             const formData = new FormData();
             formData.append('file', file);
 
+            currentPreviewImages = [];
+            const previewContent = document.getElementById('previewContent');
+            if (previewContent) previewContent.innerHTML = '';
+
+            const uploadState = document.getElementById('uploadState');
+            const previewState = document.getElementById('previewState');
+            const uploadProgress = document.getElementById('uploadProgress');
+            if (uploadState) uploadState.classList.add('hidden');
+            if (previewState) previewState.classList.add('hidden');
+            if (uploadProgress) {
+                uploadProgress.style.display = 'flex';
+                const bar = document.getElementById('progressBar');
+                const text = document.getElementById('progressText');
+                const pct = document.getElementById('progressPercent');
+                if (bar) { bar.style.width = '0%'; bar.classList.remove('bg-green-500'); bar.classList.add('bg-blue-500'); }
+                if (text) text.textContent = 'Uploading...';
+                if (pct) pct.textContent = '0%';
+            }
+
             try {
-                const response = await fetch('/api/upload', { method: 'POST', body: formData });
-                const data = await response.json();
+                const data = await new Promise((resolve, reject) => {
+                    const xhr = new XMLHttpRequest();
+                    currentUploadXhr = xhr;
+
+                    xhr.upload.onprogress = (e) => {
+                        if (e.lengthComputable) {
+                            const pct = Math.round((e.loaded / e.total) * 100);
+                            const bar = document.getElementById('progressBar');
+                            const pctEl = document.getElementById('progressPercent');
+                            if (bar) bar.style.width = pct + '%';
+                            if (pctEl) pctEl.textContent = pct + '%';
+                            if (pct >= 100) {
+                                const text = document.getElementById('progressText');
+                                if (text) text.textContent = 'Processing file...';
+                            }
+                        }
+                    };
+
+                    xhr.onload = function() {
+                        currentUploadXhr = null;
+                        try {
+                            if (xhr.status >= 200 && xhr.status < 300) {
+                                resolve(JSON.parse(xhr.responseText));
+                            } else {
+                                try {
+                                    const errData = JSON.parse(xhr.responseText);
+                                    reject(new Error(errData.error || 'Upload failed'));
+                                } catch (e) {
+                                    reject(new Error('Upload failed (HTTP ' + xhr.status + ')'));
+                                }
+                            }
+                        } catch (e) {
+                            reject(new Error('Invalid server response'));
+                        }
+                    };
+
+                    xhr.onerror = function() {
+                        currentUploadXhr = null;
+                        reject(new Error('Network error'));
+                    };
+
+                    xhr.onabort = function() {
+                        reject(new Error('_ABORTED_'));
+                    };
+
+                    try {
+                        xhr.open('POST', '/api/upload');
+                        xhr.send(formData);
+                    } catch (e) {
+                        reject(e);
+                    }
+                });
 
                 if (data.success) {
                     uploadedFile = data;
                     document.getElementById('previewFileName').textContent = data.filename;
                     document.getElementById('previewFileSize').textContent = formatFileSize(file.size);
-                    
-                    const uploadState = document.getElementById('uploadState');
+
+                    const uploadProgress = document.getElementById('uploadProgress');
                     const previewState = document.getElementById('previewState');
-                    if (uploadState) uploadState.classList.add('hidden');
+                    if (uploadProgress) uploadProgress.style.display = 'none';
                     if (previewState) previewState.classList.remove('hidden');
-                    
+                    const container = document.getElementById('uploadPreviewContainer');
+                    if (container) container.style.minHeight = '1296px';
+
                     updatePrintButton();
-                    
-                    // Show warning if conversion failed
+
                     if (data.warning) {
                         showToast('Upload successful: ' + data.warning, 'warning');
                     } else {
                         showToast('File uploaded successfully', 'success');
                     }
-                    
-                    // Pass preview images if available
-                    const previewImages = data.preview_images || [];
-                    
-                    // If conversion failed (warning present), previewImages will be empty
-                    // This is expected - user needs to re-upload after fixing the issue
-                    loadPreview(data.filename, previewImages);
+
+                    loadPreview(data.filename, data.preview_images || []);
                 } else {
-                    showToast('Upload failed: ' + data.error, 'error');
+                    resetUploadUI();
+                    showToast('Upload failed: ' + (data.error || 'Unknown error'), 'error');
                 }
             } catch (error) {
-                console.error('上传错误:', error);
+                if (error.message === '_ABORTED_') return;
+                resetUploadUI();
                 showToast('Upload failed: ' + error.message, 'error');
             }
         }
 
         // 存储当前文件的预览图片信息
         let currentPreviewImages = [];
+        let previewCheckInterval = null;
 
         async function loadPreview(filename, previewImages = null) {
             const previewContent = document.getElementById('previewContent');
@@ -665,9 +758,7 @@
             }
             // This handles the case where images are still being generated
 
-            if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'svg'].includes(ext)) {
-                previewContent.innerHTML = `<img src="/api/preview/${encodeURIComponent(filename)}" class="w-full h-full object-contain" alt="Preview">`;
-            } else if (['pdf', 'doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx', 'rtf', 'txt'].includes(ext)) {
+            if (['pdf', 'doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx', 'rtf', 'txt', 'jpg', 'jpeg', 'png', 'gif', 'bmp', 'svg'].includes(ext)) {
                 // PDF 和文档类型：优先尝试 PDF 内嵌显示，失败则降级为图片预览
                 const previewUrl = `/api/preview/${encodeURIComponent(filename)}`;
 
@@ -688,14 +779,14 @@
                             data="${previewUrl}"
                             type="application/pdf"
                             class="w-full h-full border-0"
-                            style="height: 400px; width: 100%;">
-                        <div class="flex flex-col items-center justify-center h-full bg-gray-50 text-center px-4">
+                            style="height: 1152px; width: 100%;">
+                        <div class="flex flex-col items-center justify-start h-full bg-gray-50 text-center px-4 pt-8">
                             <svg class="h-12 w-12 mx-auto mb-3 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
                             </svg>
                             <p class="mb-2 text-gray-700 font-medium">Your browser does not support embedded PDF preview</p>
                             <p class="mb-4 text-sm text-gray-500">Please choose one of the following options</p>
-                            <div class="flex gap-3">
+                            <div class="flex flex-wrap gap-3 justify-center">
                                 <a href="${previewUrl}" target="_blank" class="inline-flex items-center gap-2 bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg transition">
                                     <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
@@ -738,14 +829,16 @@
                     });
 
                     // 方案 3: 尺寸检测（兜底）
-                    const checkLoaded = setInterval(() => {
+                    if (previewCheckInterval) clearInterval(previewCheckInterval);
+                    previewCheckInterval = setInterval(() => {
                         try {
                             const width = pdfObject.clientWidth;
                             const height = pdfObject.clientHeight;
 
                             if (width > 0 && height > 0 && width > 50 && height > 50) {
                                 pdfLoaded = true;
-                                clearInterval(checkLoaded);
+                                clearInterval(previewCheckInterval);
+                                previewCheckInterval = null;
                                 loadingIndicator.classList.add('hidden');
                                 console.log('PDF 加载成功（尺寸检测）');
                             }
@@ -777,26 +870,29 @@
             // 注意：currentPreviewImages 可能为空（上传时转换失败），此时显示提示信息
             if (currentPreviewImages && currentPreviewImages.length > 0) {
                 console.log(`使用图片预览，共 ${currentPreviewImages.length} 页`);
-                
-                let imagesHtml = '<div class="image-preview-container h-full overflow-auto bg-gray-50">';
-                imagesHtml += '<div class="flex flex-col items-center gap-2 p-4">';
-                
-                currentPreviewImages.forEach((img, index) => {
+
+                let imagesHtml = '<div class="image-preview-container h-full bg-gray-50 relative">';
+                imagesHtml += '<div class="h-full overflow-y-auto pb-12">';
+                imagesHtml += '<div class="flex flex-col items-center gap-2 p-4 pb-4">';
+
+                currentPreviewImages.forEach((img) => {
                     const imgUrl = `/api/preview/${encodeURIComponent(img.filename)}`;
                     imagesHtml += `<img src="${imgUrl}" class="max-w-full shadow-lg page-image" data-page="${img.page}" alt="Page ${img.page}" loading="lazy">`;
                 });
-                
+
                 imagesHtml += '</div>';
-                
-                // 添加页码指示器
+                imagesHtml += '</div>';
+
                 if (currentPreviewImages.length > 1) {
                     imagesHtml += `
-                        <div class="page-indicator fixed bottom-16 left-1/2 transform -translate-x-1/2 bg-black/70 text-white px-4 py-2 rounded-full text-sm flex items-center gap-2">
-                            <span>Total ${currentPreviewImages.length} pages</span>
+                        <div class="absolute bottom-3 left-1/2 -translate-x-1/2 pointer-events-none z-10">
+                            <span class="inline-block bg-black/70 text-white px-4 py-1.5 rounded-full text-sm whitespace-nowrap">
+                                Total ${currentPreviewImages.length} pages
+                            </span>
                         </div>
                     `;
                 }
-                
+
                 imagesHtml += '</div>';
                 previewContent.innerHTML = imagesHtml;
             } else {
@@ -911,14 +1007,6 @@
             if (uploadState) uploadState.classList.remove('hidden');
             if (previewState) previewState.classList.add('hidden');
             if (previewContent) previewContent.innerHTML = '';
-
-            // 只重置文件相关，保留打印参数设置
-            // const pageRange = document.getElementById('pageRange');
-            // const mirrorPrint = document.getElementById('mirrorPrint');
-            // const printScaling = document.getElementById('printScaling');
-            // if (pageRange) pageRange.value = '';
-            // if (mirrorPrint) mirrorPrint.checked = false;
-            // if (printScaling) printScaling.value = 'fit';
 
             updatePrintButton();
 
@@ -1192,7 +1280,7 @@
                 const response = await fetch(`/api/printer/${encodeURIComponent(selectedPrinter)}`);
                 
                 if (!response.ok) {
-                    console.error(`updatePrinterInfoDisplay: HTTP 错误 ${response.status}`);
+                    throw new Error(`HTTP ${response.status}`);
                 }
                 
                 const printer = await response.json();
@@ -1220,13 +1308,13 @@
                     const traysHtml = trays.map(tray => {
                         let name = tray.name || tray.tray_name || 'Unknown';
                         let type = tray.type || tray.paper_type || 'Unknown';
-                        let status = tray.status_cn || tray.status || 'Unknown';
+                        let status = tray.status_en || tray.status_cn || tray.status || 'Unknown';
                         let mediaReady = tray.media_ready || tray.paper_size || 'Unknown';
                         let statusClass = 'text-gray-500';
 
                         if (status === 'Available' || status === 'Loaded' || status === 'Normal' || status === 'OK') {
                             statusClass = 'text-green-600';
-                        } else if (status === 'Empty') {
+                        } else if (status === 'Empty' || status === 'Removed') {
                             statusClass = 'text-red-600';
                         } else if (status === 'Warning') {
                             statusClass = 'text-yellow-600';
@@ -1250,7 +1338,7 @@
                                         <svg class="w-5 h-5 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/>
                                         </svg>
-                                        <span class="font-medium">${name}</span>
+                                        <span class="font-medium break-words">${name}</span>
                                     </div>
                                     <div class="flex items-center gap-1">
                                         ${statusIcon}
@@ -1260,11 +1348,11 @@
                                 <div class="grid grid-cols-2 gap-2 text-xs">
                                     <div>
                                         <div class="text-gray-500">Tray type</div>
-                                        <div class="font-medium">${type}</div>
+                                        <div class="font-medium break-words">${type}</div>
                                     </div>
                                     <div>
                                         <div class="text-gray-500">Paper size</div>
-                                        <div class="font-medium">${mediaReady}</div>
+                                        <div class="font-medium break-words">${mediaReady}</div>
                                     </div>
                                 </div>
                             </div>
@@ -1276,7 +1364,7 @@
                 }
             }
 
-            // 更新墨盒显示
+            // Update ink cartridge display
             const printerInkInfo = document.getElementById('printerInkInfo');
             if (printerInkInfo) {
                 const cartridges = printer.ink_cartridges || [];
@@ -1284,13 +1372,43 @@
                     const cartridgesHtml = cartridges.map(cartridge => {
                         let colorHex = '';
                         let colorName = cartridge.name || 'Unknown';
-                        let level = cartridge.level || 0;
-                        let status = 'Normal';
-                        const isWasteInk = cartridge.type === 'waste-ink' || (cartridge.name && cartridge.name.includes('废墨'));
+                        let level = cartridge.level;
+                        let status;
+                        const isWasteInk = cartridge.type === 'waste-ink' || (cartridge.name && cartridge.name.includes('Waste'));
+
+                        // Handle IPP special level values (-1, -2, -3)
+                        let levelText = '';
+                        let showProgress = true;
+
+                        if (cartridge.level_status) {
+                            switch (cartridge.level_status) {
+                                case 'unknown':
+                                    levelText = 'Unknown';
+                                    showProgress = false;
+                                    break;
+                                case 'not_installed':
+                                    levelText = 'Not Installed';
+                                    showProgress = false;
+                                    break;
+                                case 'not_applicable':
+                                    levelText = 'N/A';
+                                    showProgress = false;
+                                    break;
+                                default:
+                                    levelText = `${level}%`;
+                            }
+                        } else if (level === null || level < 0) {
+                            levelText = 'Unknown';
+                            showProgress = false;
+                        } else {
+                            levelText = `${level}%`;
+                        }
 
                         if (cartridge.color && cartridge.color.startsWith('#')) {
                             colorHex = cartridge.color;
-                            if (isWasteInk) {
+                            if (level === null) {
+                                status = 'Unknown';
+                            } else if (isWasteInk) {
                                 status = level >= 80 ? 'Warning' : 'Normal';
                             } else {
                                 status = level > 20 ? 'Normal' : (level > 0 ? 'Warning' : 'Empty');
@@ -1309,17 +1427,24 @@
                         }
 
                         let progressColor = 'bg-green-500';
-                        if (isWasteInk) {
-                            if (level >= 80) progressColor = 'bg-red-500';
-                            else if (level >= 50) progressColor = 'bg-yellow-500';
+                        if (showProgress) {
+                            if (isWasteInk) {
+                                if (level >= 80) progressColor = 'bg-red-500';
+                                else if (level >= 50) progressColor = 'bg-yellow-500';
+                            } else {
+                                if (level < 20) progressColor = 'bg-red-500';
+                                else if (level < 50) progressColor = 'bg-yellow-500';
+                            }
                         } else {
-                            if (level < 20) progressColor = 'bg-red-500';
-                            else if (level < 50) progressColor = 'bg-yellow-500';
+                            progressColor = 'bg-gray-300';
                         }
 
                         let statusIcon = '';
                         let statusClass = 'text-gray-600';
-                        if (status === 'Normal' || status === 'OK') {
+                        if (!showProgress) {
+                            statusIcon = '<svg class="w-3 h-3 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>';
+                            statusClass = 'text-gray-500';
+                        } else if (status === 'Normal' || status === 'OK') {
                             statusIcon = '<svg class="w-3 h-3 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>';
                             statusClass = 'text-green-600';
                         } else if (status === 'Warning') {
@@ -1345,12 +1470,18 @@
                                         <span class="text-xs ${statusClass}">${status}</span>
                                     </div>
                                 </div>
+                                ${showProgress ? `
                                 <div class="flex items-center gap-2">
                                     <span class="text-xs text-gray-600 w-8">${level}%</span>
                                     <div class="flex-1 bg-gray-200 rounded-full h-2">
                                         <div class="${progressColor} h-2 rounded-full transition-all" style="width: ${level}%"></div>
                                     </div>
                                 </div>
+                                ` : `
+                                <div class="flex items-center justify-center">
+                                    <span class="text-xs text-gray-500">${levelText}</span>
+                                </div>
+                                `}
                             </div>
                         `;
                     }).join('');
@@ -1615,7 +1746,7 @@
                     const previewImages = file.preview_images || [];
                     
                     // Check if preview images are empty (conversion may have failed)
-                    if (previewImages.length === 0 && (file.type === 'document' || file.type === 'pdf')) {
+                    if (previewImages.length === 0 && (file.type === 'document' || file.type === 'pdf' || file.type === 'image')) {
                         showToast('File selected, but preview file does not exist, please re-upload', 'warning');
                     } else {
                         showToast('File selected', 'success');
@@ -1924,11 +2055,14 @@
                 'A3': 'A3 (297×420mm)',
                 'A2': 'A2 (420×594mm)',
                 'A1': 'A1 (594×841mm)',
-                '5inch': '5 inches (89×127mm)',
-                '6inch': '6 inches (102×152mm)',
-                '7inch': '7 inches (127×178mm)',
-                '8inch': '8 inches (152×203mm)',
-                '10inch': '10 inches (203×254mm)'
+                'A5': 'A5 (148×210mm)',
+                'A6': 'A6 (105×148mm)',
+                'B4': 'B4 (250×353mm)',
+                'B5': 'B5 (176×250mm)',
+                '3.5x5': '3.5×5 inches (89×127mm)',
+                '4x6': '4×6 inches (102×152mm)',
+                '5x7': '5×7 inches (127×178mm)',
+                '8x10': '8×10 inches (203×254mm)'
             };
             return texts[size] || size;
         }

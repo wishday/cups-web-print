@@ -19,6 +19,13 @@ import re
 import shutil
 import glob
 
+# 导入 img2pdf（图片转 PDF 无损转换，非必需——有 LibreOffice 作为 fallback）
+try:
+    import img2pdf
+    IMG2PDF_AVAILABLE = True
+except ImportError:
+    IMG2PDF_AVAILABLE = False
+
 # 导入 IPP 客户端
 try:
     from ipp_client import IPPTOOL_AVAILABLE
@@ -473,6 +480,48 @@ def convert_to_pdf(input_file, output_dir):
         logger.error(f"文档转换异常：{e}")
         return None
 
+def convert_image_to_pdf(input_file, output_dir):
+    """
+    将图片转换为 PDF
+    - raster 图片（jpg/jpeg/png/gif/bmp）：使用 img2pdf（无损），不可用时降级 LibreOffice
+    - SVG：使用 LibreOffice 转换
+
+    Args:
+        input_file: 输入图片路径
+        output_dir: 输出目录
+
+    Returns:
+        转换后的 PDF 文件路径，如果失败返回 None
+    """
+    filename = os.path.basename(input_file)
+    name, ext = os.path.splitext(filename)
+    ext_lower = ext.lower()
+    pdf_filename = f"{name}.pdf"
+    pdf_path = os.path.join(output_dir, pdf_filename)
+
+    # SVG：img2pdf 不支持，直接用 LibreOffice
+    if ext_lower == '.svg':
+        logger.info(f"SVG 文件使用 LibreOffice 转换：{filename}")
+        return convert_to_pdf(input_file, output_dir)
+
+    # raster 图片：优先使用 img2pdf（无损）
+    if IMG2PDF_AVAILABLE:
+        try:
+            with open(input_file, 'rb') as f:
+                pdf_bytes = img2pdf.convert(f.read())
+            with open(pdf_path, 'wb') as f:
+                f.write(pdf_bytes)
+            if os.path.exists(pdf_path):
+                logger.info(f"图片转换成功（img2pdf）：{pdf_path}")
+                return pdf_path
+            logger.error(f"图片转换失败（img2pdf），输出不存在：{pdf_path}")
+        except Exception as e:
+            logger.warning(f"img2pdf 转换失败（{e}），降级到 LibreOffice")
+
+    # fallback：使用 LibreOffice
+    logger.info(f"使用 LibreOffice 转换图片：{filename}")
+    return convert_to_pdf(input_file, output_dir)
+
 def get_preview_file(original_filename):
     """
     获取预览文件路径
@@ -481,29 +530,23 @@ def get_preview_file(original_filename):
         original_filename: 原始文件名
 
     Returns:
-        预览文件路径（PDF 或图片），如果无法预览返回 None
+        预览文件路径（PDF），如果无法预览返回 None
 
     注意：PDF 复制和文档转换应在 api_upload() 中完成，这里只返回已存在的路径
     """
     # 安全检查：只获取文件名，移除路径部分
     original_filename = os.path.basename(original_filename)
 
-    # 如果是 PDF，直接返回 previews/目录的 PDF（不依赖 uploads/ 原始文件）
+    # 统一逻辑：所有文件类型都返回 previews/目录中对应的 PDF
+    # 如果是 PDF，直接返回 previews/目录的 PDF
     if original_filename.lower().endswith('.pdf'):
         pdf_path = get_safe_path(app.config['PREVIEW_FOLDER'], original_filename)
         if pdf_path and os.path.exists(pdf_path):
             return pdf_path
         return None
 
-    # 如果是图片，返回 uploads/ 原始文件
-    if is_image_file(original_filename):
-        original_path = get_safe_path(app.config['UPLOAD_FOLDER'], original_filename)
-        if original_path and os.path.exists(original_path):
-            return original_path
-        return None
-
-    # 如果是文档，返回 previews/目录的 PDF（不依赖 uploads/ 原始文件）
-    if is_document_file(original_filename):
+    # 图片和文档：返回 previews/目录的 {basename}.pdf
+    if is_image_file(original_filename) or is_document_file(original_filename):
         pdf_filename = os.path.splitext(original_filename)[0] + '.pdf'
         pdf_path = get_safe_path(app.config['PREVIEW_FOLDER'], pdf_filename)
         if pdf_path and os.path.exists(pdf_path):
@@ -720,9 +763,28 @@ def get_printable_file(filepath, filename, page_range=None):
         
         return preview_pdf_path, None, False
 
-    # 图片文件 - 直接打印
+    # 图片文件 - 使用预览 PDF（与文档相同逻辑）
     if is_image_file(filename):
-        return filepath, None, False
+        base_name = os.path.splitext(filename)[0]
+        pdf_filename = f"{base_name}.pdf"
+        pdf_path = get_safe_path(app.config['PREVIEW_FOLDER'], pdf_filename)
+
+        if pdf_path and os.path.exists(pdf_path):
+            logger.info(f"使用图片预览 PDF: {pdf_path}")
+            if page_range and page_range.strip():
+                logger.info(f"从预览 PDF 提取页面范围：{page_range}")
+                extracted_pdf, error = extract_pdf_pages_to_tmp(pdf_path, page_range.strip())
+                if extracted_pdf:
+                    return extracted_pdf, None, True
+                else:
+                    return None, error, False
+            return pdf_path, None, False
+        elif not pdf_path:
+            logger.error(f"预览文件路径不安全：{pdf_filename}")
+            return None, f"预览文件路径错误：{pdf_filename}", False
+        else:
+            logger.error(f"预览 PDF 不存在：{pdf_filename}，请重新上传")
+            return None, f"预览文件不存在：{pdf_filename}，请重新上传", False
 
     # Office 文档和其他需要转换的格式 - 使用预览 PDF
     if is_document_file(filename):
@@ -777,12 +839,9 @@ def submit_print_job(filepath, printer_name, color_mode='mono', duplex='one-side
     """
     job_id = str(uuid.uuid4())
     filename = os.path.basename(filepath)
-    actual_print_file = filepath  # 实际要打印的文件路径（可能是转换后的 PDF）
-    conversion_error = None  # 转换错误信息
-
     try:
-        # 检查文件类型，Office 文档需要先转换为 PDF
-        actual_print_file, conversion_error, is_temp = get_printable_file(filepath, filename, page_range)
+        # 所有文件类型（文档、图片、PDF）均有对应的预览 PDF
+        actual_print_file, conversion_error, _ = get_printable_file(filepath, filename, page_range)
         
         if conversion_error:
             logger.error(f"文件转换失败：{conversion_error}")
@@ -1006,10 +1065,11 @@ def monitor_job_progress(job_id, cups_job_id, printer_name):
                 timeout=5
             )
 
-            # 检查任务是否还在打印机队列中
+            # 检查任务是否还在打印机队列中（精确匹配行首 PrinterName-JobID）
             job_in_queue = (
                 queue_result.returncode == 0 and
-                cups_job_id in queue_result.stdout
+                any(line.strip().startswith(f"{printer_name}-{cups_job_id} ")
+                    for line in queue_result.stdout.split('\n'))
             )
 
             if job_in_queue:
@@ -1260,18 +1320,16 @@ def api_upload():
             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             file.save(filepath)
             
-            # For document files and PDFs, trigger conversion and get preview images
-            preview_images = []
-            if is_document_file(filename) or ext.lower().endswith('.pdf'):
+            # All file types: trigger conversion to PDF and generate preview images
+            if is_document_file(filename) or ext.lower().endswith('.pdf') or is_image_file(filename):
                 # Get base name for matching (remove original extension, keep timestamp)
-                # e.g., "document_20260307_120000.docx" -> "document_20260307_120000"
                 base_name = os.path.splitext(filename)[0]
-                pdf_filename = f"{base_name}.pdf"  # e.g., "document_20260307_120000.pdf"
+                pdf_filename = f"{base_name}.pdf"
 
-                # For documents, trigger conversion
                 conversion_warning = None
+
+                # For Office documents, convert using LibreOffice
                 if is_document_file(filename):
-                    # Trigger conversion
                     pdf_path = convert_to_pdf(filepath, app.config['PREVIEW_FOLDER'])
                     if not pdf_path:
                         logger.error(f"上传时文档转换失败：{filename} - LibreOffice 转换未生成 PDF 文件")
@@ -1279,16 +1337,23 @@ def api_upload():
                         logger.error(f"预期 PDF 路径：{os.path.join(app.config['PREVIEW_FOLDER'], pdf_filename)}")
                         conversion_warning = "文档转换失败，预览和打印将不可用，请检查 LibreOffice 是否安装或文档格式是否正确"
                     else:
-                        # Conversion successful, generate images
                         logger.info(f"文档转换成功，生成预览图片：{pdf_path}")
                         convert_pdf_to_images(pdf_path, app.config['PREVIEW_FOLDER'], pdf_filename=pdf_filename)
 
-                # For PDFs, generate images if exists
+                # For images, convert using img2pdf
+                elif is_image_file(filename):
+                    pdf_path = convert_image_to_pdf(filepath, app.config['PREVIEW_FOLDER'])
+                    if not pdf_path:
+                        logger.error(f"上传时图片转换失败：{filename}")
+                        conversion_warning = "图片转换失败，预览和打印将不可用"
+                    else:
+                        logger.info(f"图片转换成功，生成预览图片：{pdf_path}")
+                        convert_pdf_to_images(pdf_path, app.config['PREVIEW_FOLDER'], pdf_filename=pdf_filename)
+
+                # For PDFs, copy to previews and generate images
                 elif ext.lower().endswith('.pdf'):
                     pdf_path = os.path.join(app.config['PREVIEW_FOLDER'], pdf_filename)
                     if not os.path.exists(pdf_path):
-                        # Copy uploaded PDF to preview folder
-                        # shutil already imported at top
                         try:
                             shutil.copy2(filepath, pdf_path)
                             logger.info(f"PDF 复制成功：{pdf_path}")
@@ -1296,7 +1361,6 @@ def api_upload():
                             logger.error(f"PDF 复制失败：{copy_error}")
                             conversion_warning = "PDF 复制失败，预览和打印将不可用，请联系管理员"
 
-                    # Generate images from PDF (only if PDF exists)
                     if os.path.exists(pdf_path):
                         logger.info(f"PDF 文件，生成预览图片：{pdf_path}")
                         convert_pdf_to_images(pdf_path, app.config['PREVIEW_FOLDER'], pdf_filename=pdf_filename)
@@ -1320,7 +1384,7 @@ def api_upload():
                 response_data['preview_images_count'] = len(preview_images)
             
             # Add warning if conversion failed
-            if 'conversion_warning' in locals() and conversion_warning:
+            if conversion_warning:
                 response_data['warning'] = conversion_warning
 
             return jsonify(response_data)
@@ -1367,9 +1431,10 @@ def api_preview(filename):
         if not preview_file:
             # 无法获取预览文件 - 可能是文件不存在或转换失败
             ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
-            document_extensions = ['doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx', 'rtf', 'txt']
+            convertible_extensions = ['doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx', 'rtf', 'txt',
+                                       'jpg', 'jpeg', 'png', 'gif', 'bmp', 'svg']
             
-            if ext in document_extensions:
+            if ext in convertible_extensions:
                 # 检查是否是文件不存在
                 upload_path = get_safe_path(app.config['UPLOAD_FOLDER'], filename)
                 if not upload_path or not os.path.exists(upload_path):
@@ -1447,9 +1512,9 @@ def api_list_files():
                         file_type = 'document'  # lowercase for frontend comparison
                     else:
                         file_type = 'other'  # lowercase for frontend comparison
-                    # Get preview images for document and PDF files
+                    # Get preview images for document, image and PDF files
                     preview_images = []
-                    if file_type == 'document' or file_type == 'pdf':
+                    if file_type == 'document' or file_type == 'image' or file_type == 'pdf':
                         # Use full filename with timestamp
                         pdf_filename = os.path.splitext(filename)[0] + '.pdf'
                         preview_images = get_preview_images(pdf_filename)
@@ -1502,10 +1567,11 @@ def api_delete_file(filename):
             # 同时删除对应的预览文件（如果存在）
             # 对于文档文件和 PDF 文件，预览文件会保存在 PREVIEW_FOLDER
             name, ext = os.path.splitext(filename)
-            # 检查是否需要删除预览文件（文档或 PDF）
+            # 检查是否需要删除预览文件（文档、图片或 PDF）
             is_document = is_document_file(filename)
+            is_image = is_image_file(filename)
             is_pdf = ext.lower().endswith('.pdf')
-            if is_document or is_pdf:
+            if is_document or is_image or is_pdf:
                 # 预览文件是转换后的 PDF
                 # Use consistent naming with api_print()
                 base_name = os.path.splitext(filename)[0]

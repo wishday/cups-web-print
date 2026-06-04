@@ -225,32 +225,65 @@ def get_all_printer_info_with_status(printer_url):
 def _parse_ink_cartridges(output):
     """
     从 ipptool 输出中解析墨盒信息
-    
+    遵循 IPP RFC 3805 标准处理 marker-levels 特殊值
+
     Args:
         output: ipptool 输出文本
-        
+
     Returns:
         墨盒信息列表
     """
     marker_names = _parse_ipp_attribute(output, 'marker-names')
     marker_colors = _parse_ipp_attribute(output, 'marker-colors')
     marker_types = _parse_ipp_attribute(output, 'marker-types')
-    marker_levels = _parse_ipp_attribute(output, 'marker-levels')
-    
+    marker_levels_raw = _parse_ipp_attribute(output, 'marker-levels')
+
+    # 将 marker-levels 转换为整数（IPP 返回的是整数值，但 ipptool 输出为字符串）
+    marker_levels = []
+    for v in marker_levels_raw:
+        try:
+            marker_levels.append(int(v))
+        except (ValueError, TypeError):
+            marker_levels.append(-1)
+
     ink_cartridges = []
     for i in range(len(marker_names)):
         name = marker_names[i] if i < len(marker_names) else f'墨盒 {i+1}'
         color = marker_colors[i] if i < len(marker_colors) else 'unknown'
         level_type = marker_types[i] if i < len(marker_types) else 'unknown'
-        level = marker_levels[i] if i < len(marker_levels) else 0
-        
+
+        # 获取原始级别值
+        raw_level = marker_levels[i] if i < len(marker_levels) else -1
+
+        # 根据 IPP RFC 3805 标准处理特殊值
+        # -1: unknown, -2: notInstalled, -3: notApplicable
+        if raw_level == -1:
+            level_status = 'unknown'
+            level_value = None
+        elif raw_level == -2:
+            level_status = 'not_installed'
+            level_value = None
+        elif raw_level == -3:
+            level_status = 'not_applicable'
+            level_value = None
+        elif 0 <= raw_level <= 100:
+            level_status = 'normal'
+            level_value = raw_level
+        else:
+            # 其他异常负数或超出范围的值，视为未知
+            logger.warning(f"墨盒 '{name}' 的级别值异常: {raw_level}")
+            level_status = 'unknown'
+            level_value = None
+
         ink_cartridges.append({
             'name': name,
             'color': color,
             'type': level_type,
-            'level': level
+            'level': level_value,
+            'level_status': level_status,
+            'raw_level': raw_level
         })
-    
+
     logger.debug(f"提取到 {len(ink_cartridges)} 个墨盒信息")
     return ink_cartridges
 
@@ -269,12 +302,18 @@ def _parse_trays(output):
     media_ready_match = re.search(r'media-ready\s*\([^)]+\)\s*=\s*([^\s]+)', output)
     media_ready = media_ready_match.group(1) if media_ready_match else None
     
-    # 根据状态码映射中文状态
-    status_map = {
+    # 根据状态码映射中文/英文状态
+    status_cn_map = {
         '3': '空',
         '4': '已装载',
         '5': '可用',
         '6': '移除'
+    }
+    status_en_map = {
+        '3': 'Empty',
+        '4': 'Loaded',
+        '5': 'Available',
+        '6': 'Removed'
     }
     
     trays = []
@@ -282,13 +321,15 @@ def _parse_trays(output):
         name = tray_info.get('name', f'纸盒 {i+1}')
         tray_type = tray_info.get('type', 'unknown')
         status = tray_info.get('status', 'unknown')
-        status_cn = status_map.get(status, '未知')
+        status_cn = status_cn_map.get(status, '未知')
+        status_en = status_en_map.get(status, status)
         
         trays.append({
             'name': name,
             'type': tray_type,
             'status': status,
             'status_cn': status_cn,
+            'status_en': status_en,
             'media_ready': media_ready
         })
     
