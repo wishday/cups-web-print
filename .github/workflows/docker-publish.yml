@@ -1,14 +1,14 @@
 name: ci-docker-publish
 
 on:
-  # 自动触发：推送 main 分支或版本标签
- # push:
-  #  branches: [ "main" ]
-   # tags: [ 'v*.*.*' ]
-   
-  # 自动触发：拉取请求到 main 分支
- # pull_request:
-  #  branches: [ "main" ]
+  # 自动触发：推送 main 分支
+  push:
+    branches: [ "main" ]
+    # tags: [ 'v*.*.*' ]
+    
+   # 自动触发：拉取请求到 main 分支
+  # pull_request:
+   #  branches: [ "main" ]
   
   # 手动触发：允许自定义镜像标签和构建平台
   workflow_dispatch:

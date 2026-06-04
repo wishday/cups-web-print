@@ -87,7 +87,7 @@
                 <div class="bg-white rounded-xl shadow-md p-6">
                     <h2 class="text-xl font-semibold text-gray-800 mb-4">📁 文件预览与上传</h2>
                     
-                    <div id="uploadPreviewContainer" class="upload-area rounded-lg overflow-y-auto relative" style="min-height: 450px;">
+                    <div id="uploadPreviewContainer" class="upload-area rounded-lg overflow-y-auto relative" style="min-height: 550px;">
                         <!-- 上传状态 -->
                         <div id="uploadState" class="absolute inset-0 flex flex-col items-center justify-center cursor-pointer p-8">
                             <svg class="h-20 w-20 text-gray-300 mb-4" fill="none" viewBox="0 0 48 48" stroke="currentColor">
@@ -129,6 +129,9 @@
                                 <div class="bg-gray-200 rounded-full h-3 overflow-hidden">
                                     <div id="progressBar" class="bg-blue-500 h-3 rounded-full transition-all duration-300 ease-out" style="width: 0%"></div>
                                 </div>
+                                <button id="cancelUploadBtn" class="mt-4 w-full bg-red-500 hover:bg-red-600 text-white text-sm py-2 rounded-lg transition">
+                                    × 取消上传
+                                </button>
                             </div>
                         </div>
 
@@ -402,6 +405,8 @@
     <div id="toast" class="fixed bottom-4 right-4 bg-gray-800 text-white px-6 py-3 rounded-lg hidden"></div>
 
     <script>
+        const UPLOAD_LIMIT = {{ max_upload_size }};
+        const ALLOWED_EXTENSIONS = {{ allowed_extensions | tojson }};
         let uploadedFile = null;
         let currentUploadXhr = null;
         let jobs = [];
@@ -621,8 +626,6 @@
             const uploadState = document.getElementById('uploadState');
             if (uploadProgress) uploadProgress.style.display = 'none';
             if (uploadState) uploadState.classList.remove('hidden');
-            const container = document.getElementById('uploadPreviewContainer');
-            if (container) container.style.minHeight = '450px';
         }
 
         async function handleFile(file) {
@@ -631,8 +634,20 @@
                 currentUploadXhr = null;
             }
 
+            const ext = file.name.split('.').pop().toLowerCase();
+            if (!ALLOWED_EXTENSIONS.includes(ext)) {
+                showToast(`不支持的文件格式 .${ext}，支持：${ALLOWED_EXTENSIONS.join(', ')}`, 'error');
+                return;
+            }
+            if (file.size > UPLOAD_LIMIT) {
+                showToast(`文件过大（限制 ${UPLOAD_LIMIT / 1024 / 1024}MB），当前 ${(file.size / 1024 / 1024).toFixed(1)}MB`, 'error');
+                return;
+            }
+
             const formData = new FormData();
+            const uploadToken = 'up_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
             formData.append('file', file);
+            formData.append('upload_token', uploadToken);
 
             currentPreviewImages = [];
             const previewContent = document.getElementById('previewContent');
@@ -653,10 +668,21 @@
                 if (pct) pct.textContent = '0%';
             }
 
+            document.getElementById('cancelUploadBtn').onclick = function() {
+                if (currentUploadXhr) {
+                    currentUploadXhr.abort();
+                    currentUploadXhr = null;
+                }
+                fetch('/api/upload-cancel/' + uploadToken, {method: 'DELETE'}).catch(function() {});
+                resetUploadUI();
+                showToast('上传已取消', 'info');
+            };
+
             try {
                 const data = await new Promise((resolve, reject) => {
                     const xhr = new XMLHttpRequest();
                     currentUploadXhr = xhr;
+                    xhr.timeout = 180000;
 
                     xhr.upload.onprogress = (e) => {
                         if (e.lengthComputable) {
@@ -699,6 +725,11 @@
                         reject(new Error('_ABORTED_'));
                     };
 
+                    xhr.ontimeout = function() {
+                        currentUploadXhr = null;
+                        reject(new Error('上传超时，请检查网络连接或文件大小后重试'));
+                    };
+
                     try {
                         xhr.open('POST', '/api/upload');
                         xhr.send(formData);
@@ -716,9 +747,6 @@
                     const previewState = document.getElementById('previewState');
                     if (uploadProgress) uploadProgress.style.display = 'none';
                     if (previewState) previewState.classList.remove('hidden');
-                    const container = document.getElementById('uploadPreviewContainer');
-                    if (container) container.style.minHeight = '1296px';
-
                     updatePrintButton();
 
                     if (data.warning) {
@@ -758,7 +786,7 @@
             }
             // This handles the case where images are still being generated
 
-            if (['pdf', 'doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx', 'rtf', 'txt', 'jpg', 'jpeg', 'png', 'gif', 'bmp', 'svg'].includes(ext)) {
+            if (ALLOWED_EXTENSIONS.includes(ext)) {
                 // PDF 和文档类型：优先尝试 PDF 内嵌显示，失败则降级为图片预览
                 const previewUrl = `/api/preview/${encodeURIComponent(filename)}`;
 
@@ -1904,6 +1932,7 @@
         function getStatusColor(status) {
             const colors = {
                 'submitted': 'bg-blue-100 text-blue-800',
+                'queued': 'bg-purple-100 text-purple-800',
                 'processing': 'bg-yellow-100 text-yellow-800',
                 'completed': 'bg-green-100 text-green-800',
                 'failed': 'bg-red-100 text-red-800',
@@ -1923,6 +1952,7 @@
         function getStatusText(status) {
             const texts = {
                 'submitted': '已提交',
+                'queued': '排队中',
                 'processing': '处理中',
                 'completed': '已完成',
                 'failed': '失败',
@@ -1935,7 +1965,7 @@
         // 判断任务是否可以取消
         function canCancelJob(status) {
             // 只有已提交和处理中的任务可以取消
-            return status === 'submitted' || status === 'processing';
+            return status === 'submitted' || status === 'queued' || status === 'processing';
         }
 
         // 判断任务是否可以删除

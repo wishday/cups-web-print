@@ -84,6 +84,38 @@ logger.addHandler(console_handler)
 # 存储打印任务状态
 print_jobs = {}
 print_jobs_lock = threading.Lock()  # 添加线程锁保护共享数据
+
+# 上传取消令牌
+_upload_tokens = {}
+_upload_tokens_lock = threading.Lock()
+
+
+def _register_upload_file(token, filepath):
+    """注册上传文件路径，返回 (是否已取消, 是否应终止)"""
+    with _upload_tokens_lock:
+        entry = _upload_tokens.get(token)
+        if not entry:
+            return True  # token 不存在，应终止
+        entry['files'].append(filepath)
+        if entry.get('cancelled'):
+            return True
+    return False
+
+
+def _cleanup_upload(token):
+    """清理 token 下所有已注册文件"""
+    with _upload_tokens_lock:
+        entry = _upload_tokens.pop(token, None)
+    if not entry:
+        return
+    for path in entry.get('files', []):
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                logger.info(f"已清理取消上传的残留文件：{path}")
+        except Exception as e:
+            logger.warning(f"清理残留文件失败：{path}, {e}")
+
 def is_safe_path(base_path, target_path):
     """
     检查目标路径是否在基础路径内，防止路径遍历攻击
@@ -1019,34 +1051,35 @@ def submit_print_job(filepath, printer_name, color_mode='mono', duplex='one-side
 
 def monitor_job_progress(job_id, cups_job_id, printer_name):
     """
-    监控打印任务进度（使用 lpstat 基础监控）
+    监控打印任务进度（根据队列位置）
 
     每秒检查任务是否在 CUPS 队列中：
-    - 在队列中：进度 = min(90, elapsed_time)
     - 不在队列：任务完成
+    - 在队列中且为最小 job ID：处于队首，开始处理计时
+    - 在队列中但不是最小 job ID：排队等待
     - 最大监控时间：10 分钟
     """
-    # 记录开始时间
     start_time = time.time()
-    max_monitor_time = 10 * 60  # 最大监控时间：10 分钟
+    processing_start_time = None
+    max_monitor_time = 10 * 60
 
     while True:
-        # 检查任务是否存在（加锁读取）
         with print_jobs_lock:
             if job_id not in print_jobs:
                 logger.debug(f"任务 {job_id} 不存在，停止监控")
                 break
             job_status = print_jobs[job_id].get('status')
-        
-        # 检查任务是否已被取消
+
         if job_status == 'cancelled':
             logger.debug(f"任务 {job_id} 已取消，停止监控")
             break
 
-        # 计算已运行时间
+        if cups_job_id is None:
+            logger.warning(f"任务 {job_id} 缺少 CUPS job ID，无法跟踪进度，放弃监控")
+            break
+
         elapsed_time = time.time() - start_time
 
-        # 检查是否超过最大监控时间
         if elapsed_time >= max_monitor_time:
             with print_jobs_lock:
                 if job_id in print_jobs:
@@ -1057,7 +1090,6 @@ def monitor_job_progress(job_id, cups_job_id, printer_name):
             break
 
         try:
-            # 使用 lpstat 检查任务是否在打印机队列中
             queue_result = subprocess.run(
                 ['lpstat', '-o', printer_name],
                 capture_output=True,
@@ -1065,7 +1097,6 @@ def monitor_job_progress(job_id, cups_job_id, printer_name):
                 timeout=5
             )
 
-            # 检查任务是否还在打印机队列中（精确匹配行首 PrinterName-JobID）
             job_in_queue = (
                 queue_result.returncode == 0 and
                 any(line.strip().startswith(f"{printer_name}-{cups_job_id} ")
@@ -1073,29 +1104,58 @@ def monitor_job_progress(job_id, cups_job_id, printer_name):
             )
 
             if job_in_queue:
-                # 任务还在队列中：每秒进度 +1，直到 90%
-                progress = min(90, int(elapsed_time))
-                with print_jobs_lock:
-                    if job_id in print_jobs:
-                        print_jobs[job_id]['status'] = 'processing'
-                        print_jobs[job_id]['progress'] = progress
-                        print_jobs[job_id]['message'] = f'打印中... ({progress}%)'
-                logger.debug(f"任务 {job_id} 仍在队列中，进度：{progress}%")
+                # 解析队列中所有 CUPS job ID
+                all_ids = []
+                for line in queue_result.stdout.split('\n'):
+                    m = re.match(rf'{re.escape(printer_name)}-(\d+)\s', line)
+                    if m:
+                        all_ids.append(int(m.group(1)))
+
+                current_cups_id = int(cups_job_id)
+                is_front = all_ids and current_cups_id == min(all_ids)
+
+                if is_front:
+                    # 队首：开始或继续处理计时
+                    if processing_start_time is None:
+                        processing_start_time = time.time()
+                    processing_elapsed = time.time() - processing_start_time
+                    progress = min(90, int(processing_elapsed))
+                    with print_jobs_lock:
+                        if job_id in print_jobs:
+                            print_jobs[job_id]['status'] = 'processing'
+                            print_jobs[job_id]['progress'] = progress
+                            print_jobs[job_id]['message'] = f'打印中... ({progress}%)'
+                    logger.debug(f"任务 {job_id} 正在打印，进度：{progress}%")
+                else:
+                    # 排队中：重置处理计时，显示前方任务数
+                    processing_start_time = None
+                    sorted_ids = sorted(all_ids)
+                    position = sorted_ids.index(current_cups_id)
+                    with print_jobs_lock:
+                        if job_id in print_jobs:
+                            print_jobs[job_id]['status'] = 'queued'
+                            print_jobs[job_id]['progress'] = 0
+                            print_jobs[job_id]['message'] = f'排队中（前方 {position} 个任务）'
+                    logger.debug(f"任务 {job_id} 排队中，前方 {position} 个任务")
             else:
                 # 任务不在队列中：显示 100% 完成
+                if processing_start_time is None:
+                    processing_start_time = start_time
+                total_time = int(time.time() - processing_start_time)
                 with print_jobs_lock:
                     if job_id in print_jobs:
                         print_jobs[job_id]['status'] = 'completed'
                         print_jobs[job_id]['progress'] = 100
-                        print_jobs[job_id]['message'] = f'打印完成 (耗时{int(elapsed_time)}秒)'
+                        print_jobs[job_id]['message'] = f'打印完成 (耗时{total_time}秒)'
                 logger.info(f"任务 {job_id} 已完成")
-                # 清理临时文件
                 cleanup_temp_file(job_id)
                 break
 
         except Exception as e:
             logger.error(f"监控任务进度失败：{e}")
             time.sleep(10)
+        else:
+            time.sleep(1)
 
 
 def cleanup_temp_file(job_id):
@@ -1183,12 +1243,16 @@ def get_printer_queue(printer_name):
 @app.route('/zh')
 def index():
     """中文主页（默认）"""
-    return render_template('index.html')
+    return render_template('index.html',
+        max_upload_size=app.config['MAX_CONTENT_LENGTH'],
+        allowed_extensions=sorted(app.config['ALLOWED_EXTENSIONS']))
 
 @app.route('/en')
 def index_en():
     """English Home Page"""
-    return render_template('index_en.html')
+    return render_template('index_en.html',
+        max_upload_size=app.config['MAX_CONTENT_LENGTH'],
+        allowed_extensions=sorted(app.config['ALLOWED_EXTENSIONS']))
 
 @app.route('/api/printers', methods=['GET'])
 def api_printers():
@@ -1296,6 +1360,26 @@ def api_printer_detail(printer_name):
     
     return jsonify(printer_data)
 
+@app.route('/api/upload-cancel/<token>', methods=['DELETE'])
+def api_upload_cancel(token):
+    """取消上传，标记取消并清理已注册的文件（不 pop token，留给 api_upload 结束清理）"""
+    with _upload_tokens_lock:
+        entry = _upload_tokens.get(token)
+        if not entry:
+            return jsonify({'success': True})
+        entry['cancelled'] = True
+        files = list(entry['files'])
+        entry['files'].clear()
+    for path in files:
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+                logger.info(f"已清理取消上传的残留文件：{path}")
+        except Exception as e:
+            logger.warning(f"清理残留文件失败：{path}, {e}")
+    return jsonify({'success': True})
+
+
 @app.route('/api/upload', methods=['POST'])
 def api_upload():
     """上传文件"""
@@ -1307,6 +1391,11 @@ def api_upload():
         return jsonify({'error': '未选择文件'}), 400
     
     if file and allowed_file(file.filename):
+        token = request.form.get('upload_token', '')
+        if token:
+            with _upload_tokens_lock:
+                _upload_tokens[token] = {'cancelled': False, 'files': []}
+
         try:
             # 获取文件名和扩展名（使用自定义 safe_filename 保留中文等非ASCII字符）
             original_filename = file.filename
@@ -1319,6 +1408,10 @@ def api_upload():
             
             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             file.save(filepath)
+
+            if token and _register_upload_file(token, filepath):
+                _cleanup_upload(token)
+                return jsonify({'error': '上传已取消'}), 499
             
             # All file types: trigger conversion to PDF and generate preview images
             if is_document_file(filename) or ext.lower().endswith('.pdf') or is_image_file(filename):
@@ -1337,6 +1430,9 @@ def api_upload():
                         logger.error(f"预期 PDF 路径：{os.path.join(app.config['PREVIEW_FOLDER'], pdf_filename)}")
                         conversion_warning = "文档转换失败，预览和打印将不可用，请检查 LibreOffice 是否安装或文档格式是否正确"
                     else:
+                        if token and _register_upload_file(token, pdf_path):
+                            _cleanup_upload(token)
+                            return jsonify({'error': '上传已取消'}), 499
                         logger.info(f"文档转换成功，生成预览图片：{pdf_path}")
                         convert_pdf_to_images(pdf_path, app.config['PREVIEW_FOLDER'], pdf_filename=pdf_filename)
 
@@ -1347,6 +1443,9 @@ def api_upload():
                         logger.error(f"上传时图片转换失败：{filename}")
                         conversion_warning = "图片转换失败，预览和打印将不可用"
                     else:
+                        if token and _register_upload_file(token, pdf_path):
+                            _cleanup_upload(token)
+                            return jsonify({'error': '上传已取消'}), 499
                         logger.info(f"图片转换成功，生成预览图片：{pdf_path}")
                         convert_pdf_to_images(pdf_path, app.config['PREVIEW_FOLDER'], pdf_filename=pdf_filename)
 
@@ -1356,6 +1455,9 @@ def api_upload():
                     if not os.path.exists(pdf_path):
                         try:
                             shutil.copy2(filepath, pdf_path)
+                            if token and _register_upload_file(token, pdf_path):
+                                _cleanup_upload(token)
+                                return jsonify({'error': '上传已取消'}), 499
                             logger.info(f"PDF 复制成功：{pdf_path}")
                         except Exception as copy_error:
                             logger.error(f"PDF 复制失败：{copy_error}")
@@ -1387,8 +1489,15 @@ def api_upload():
             if conversion_warning:
                 response_data['warning'] = conversion_warning
 
+            # 成功，清除 token
+            if token:
+                with _upload_tokens_lock:
+                    _upload_tokens.pop(token, None)
+
             return jsonify(response_data)
         except Exception as e:
+            if token:
+                _cleanup_upload(token)
             return jsonify({'error': f'文件保存失败: {str(e)}'}), 500
     
     return jsonify({'error': '不支持的文件类型'}), 400
