@@ -309,11 +309,11 @@
                     <div class="mb-4">
                         <label class="block text-sm font-medium text-gray-700 mb-2">Print Scaling</label>
                         <select id="printScaling" class="w-full border border-gray-300 rounded-lg px-4 py-2">
-                            <option value="auto">Auto</option>
-                            <option value="auto-fit">Auto-fit</option>
-                            <option value="fit" selected>Fit to paper</option>
-                            <option value="fill">Fill paper</option>
-                            <option value="none">None</option>
+                            <option value="auto">Auto (printer decides)</option>
+                            <option value="auto-fit">Fit content (shrink only, never enlarge)</option>
+                            <option value="fit" selected>Scale to fit page (enlarges small pages)</option>
+                            <option value="fill">Fill page (crops overflow)</option>
+                            <option value="none">Actual size (1:1, crops overflow)</option>
                         </select>
                     </div>
 
@@ -560,18 +560,28 @@
                 });
             }
 
-            // 为label元素添加点击事件，防止事件冒泡
-            const labelElement = uploadState?.querySelector('label');
-            if (labelElement) {
-                labelElement.addEventListener('click', (e) => {
-                    // label会自动触发fileInput的click()，这里只需要阻止冒泡
-                    e.stopPropagation();
+            // 移除 label 的 for 绑定，改为纯 JS 触发，避免
+            // "label 原生激活 + fileInput.click()" 重复打开文件选择器
+            // （移动端浏览器上会连续弹出多个选择窗口）
+            document.querySelectorAll('label[for="fileInput"]').forEach(lab => {
+                lab.removeAttribute('for');
+            });
+
+            // 点击上传区域触发文件选择（唯一触发入口，避免重复触发）
+            if (uploadState) {
+                uploadState.addEventListener('click', (e) => {
+                    if (fileInput) {
+                        fileInput.click();
+                    }
                 });
             }
 
-            // 点击上传区域触发文件选择（避免重复触发）
-            if (uploadState) {
-                uploadState.addEventListener('click', (e) => {
+            // "更换"按钮同样通过 JS 触发文件选择（for 属性已移除，原生绑定不存在）
+            const changeLabel = document.querySelector('#previewState label[for="fileInput"]')
+                || document.querySelector('#previewState label');
+            if (changeLabel) {
+                changeLabel.addEventListener('click', (e) => {
+                    e.stopPropagation();
                     if (fileInput) {
                         fileInput.click();
                     }
@@ -2226,11 +2236,11 @@
 
         function getPrintScalingText(scaling) {
             const texts = {
-                'auto': 'Auto',
-                'auto-fit': 'Auto-fit',
-                'fit': 'Fit to paper',
-                'fill': 'Fill paper',
-                'none': 'None'
+                'auto': 'Auto (printer decides)',
+                'auto-fit': 'Fit content (shrink only, never enlarge)',
+                'fit': 'Scale to fit page (enlarges small pages)',
+                'fill': 'Fill page (crops overflow)',
+                'none': 'Actual size (1:1, crops overflow)'
             };
             return texts[scaling] || scaling;
         }
