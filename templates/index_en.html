@@ -310,8 +310,8 @@
                         <label class="block text-sm font-medium text-gray-700 mb-2">Print Scaling</label>
                         <select id="printScaling" class="w-full border border-gray-300 rounded-lg px-4 py-2">
                             <option value="auto">Auto (printer decides)</option>
-                            <option value="auto-fit">Fit content (shrink only, never enlarge)</option>
-                            <option value="fit" selected>Scale to fit page (enlarges small pages)</option>
+                            <option value="auto-fit" selected>Fit content (shrink only, never enlarge)</option>
+                            <option value="fit">Scale to fit page (enlarges small pages)</option>
                             <option value="fill">Fill page (crops overflow)</option>
                             <option value="none">Actual size (1:1, crops overflow)</option>
                         </select>
@@ -1115,7 +1115,7 @@
                         copies: parseInt(copies.value) || 1,
                         page_range: pageRange ? pageRange.value.trim() : null,
                         mirror: mirrorPrint ? mirrorPrint.checked : false,
-                        print_scaling: printScaling ? printScaling.value : 'fit'
+                        print_scaling: printScaling ? printScaling.value : 'auto-fit'
                     })
                 });
 

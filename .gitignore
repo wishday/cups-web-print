@@ -2,8 +2,9 @@
 __pycache__/
 *.pyc
 
-# Log files
+# Log files（含轮转产物 app.log.1 / app.log.2.gz 等）
 *.log
+*.log.*
 
 # Backup files
 *.bak
@@ -18,3 +19,11 @@ uploads/*
 !uploads/.gitkeep
 previews/*
 !previews/.gitkeep
+
+# 随仓库分发的演示文件（demo），保持被跟踪并打进镜像
+!uploads/demo_20260318_100521.doc
+!previews/demo_20260318_100521.pdf
+!previews/demo_20260318_100521-1.png
+!previews/demo_20260318_100521-2.png
+!previews/demo_20260318_100521-3.png
+!previews/demo_20260318_100521-4.png

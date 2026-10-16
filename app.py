@@ -488,6 +488,82 @@ def is_document_file(filename):
 
 
 
+def is_valid_pdf(pdf_path):
+    """
+    检查 PDF 文件是否完整可读
+
+    转换进程（LibreOffice / pdftk）被超时 kill 时，可能已在磁盘上留下只写了
+    一半的 PDF。仅凭 os.path.exists 无法识别这种截断文件，若不加校验就会被
+    get_printable_file() 当作有效文件送去打印机，打出损坏内容。
+
+    校验 PDF 的两个结构标记：
+    - 文件开头的 %PDF- magic bytes
+    - 文件尾部的 %%EOF 结束标记（PDF 规范要求的最后一个标记）
+
+    Args:
+        pdf_path: PDF 文件路径
+
+    Returns:
+        bool: 文件存在且结构完整返回 True
+    """
+    try:
+        size = os.path.getsize(pdf_path)
+        if size < 8:  # 连 %PDF- 都放不下
+            return False
+        with open(pdf_path, 'rb') as f:
+            if f.read(5) != b'%PDF-':
+                return False
+            # %%EOF 之后允许有少量填充/增量更新字节，多留余量避免误判
+            tail_len = min(size, 2048)
+            f.seek(-tail_len, os.SEEK_END)
+            return b'%%EOF' in f.read(tail_len)
+    except OSError:
+        return False
+
+
+def remove_partial_file(path):
+    """
+    删除转换失败/超时后残留的不完整文件
+
+    只删除被 is_valid_pdf 判定为不完整的文件：转换失败不代表目标路径上一定
+    是半截产物，也可能是上一次成功转换留下的完好预览，误删会白白丢数据。
+    加了这层判断后，各失败分支可以无条件调用本函数。
+
+    Args:
+        path: 待删除的文件路径（为 None 或空时直接返回）
+    """
+    if not path:
+        return
+    try:
+        if os.path.exists(path) and not is_valid_pdf(path):
+            os.remove(path)
+            logger.warning(f"已清理转换残留的不完整文件：{path}")
+    except OSError as e:
+        logger.warning(f"清理残留文件失败：{path} ({e})")
+
+
+def remove_partial_images(output_prefix):
+    """
+    删除 pdftoppm 失败/超时后残留的部分页面图片
+
+    pdftoppm 被 kill 时会留下 {prefix}-1.png .. {prefix}-N.png 中的一部分，
+    这些文件名与正常产物完全一致，会被 get_preview_images() 的 glob 一并收进
+    预览，导致预览显示残缺页面。
+
+    Args:
+        output_prefix: pdftoppm 输出前缀（不含页码和扩展名）
+    """
+    if not output_prefix:
+        return
+    pattern = f"{glob.escape(output_prefix)}-*.png"
+    for img_path in glob.glob(pattern):
+        try:
+            os.remove(img_path)
+            logger.warning(f"已清理转换残留的不完整预览图：{img_path}")
+        except OSError as e:
+            logger.warning(f"清理残留预览图失败：{img_path} ({e})")
+
+
 def convert_pdf_to_images(pdf_path, output_dir, dpi=150, pdf_filename=None):
     """
     Convert PDF pages to PNG images using pdftoppm
@@ -501,6 +577,9 @@ def convert_pdf_to_images(pdf_path, output_dir, dpi=150, pdf_filename=None):
     Returns:
         List of generated image paths, or empty list if failed
     """
+    # 预先置空：subprocess 超时可能发生在 output_prefix 赋值之前，
+    # 异常分支里需要这个变量做残留清理，不能让它未定义。
+    output_prefix = None
     try:
         # Check if pdftoppm is available
         try:
@@ -542,13 +621,20 @@ def convert_pdf_to_images(pdf_path, output_dir, dpi=150, pdf_filename=None):
             return image_files
 
         logger.error(f"PDF to image conversion failed: {result.stderr}")
+        # 非零退出时 pdftoppm 可能已写出部分页面。残留的 {prefix}-N.png 与正常
+        # 产物命名完全一致，会被 get_preview_images() 的 glob 收进预览，
+        # 展示出残缺页面，必须就地清理。
+        remove_partial_images(output_prefix)
         return []
 
     except subprocess.TimeoutExpired:
         logger.error("PDF to image conversion timeout")
+        # 超时被 kill 时已写出的页面是截断的，清理掉
+        remove_partial_images(output_prefix)
         return []
     except Exception as e:
         logger.error(f"PDF to image conversion failed: {e}")
+        remove_partial_images(output_prefix)
         return []
 
 
@@ -607,16 +693,24 @@ def convert_to_pdf(input_file, output_dir):
     Returns:
         转换后的 PDF 文件路径，如果失败返回 None
     """
-    try:
-        filename = os.path.basename(input_file)
-        name, ext = os.path.splitext(filename)
+    # 预先算出输出路径：超时被 kill 或抛异常时，except 分支必须用它定位并删除
+    # 已写出一半的 PDF。原先 pdf_path 在 subprocess.run 之后才赋值，
+    # 导致 except 分支拿不到它，残留文件留在 previews/ 里。
+    filename = os.path.basename(input_file)
+    name, ext = os.path.splitext(filename)
+    pdf_path = os.path.join(output_dir, f"{name}.pdf")
 
+    try:
         # 检查 libreoffice 是否可用
         try:
             subprocess.run(['libreoffice', '--version'],
                          capture_output=True, timeout=5)
         except (FileNotFoundError, subprocess.TimeoutExpired) as e:
             logger.error("LibreOffice 未安装或不可用")
+            # 此处直接 return 会绕过外层的失败清理。输出路径上若残留着上一次
+            # 被 kill 留下的半截 PDF，不清理就会一直被后续打印流程误用。
+            # 函数只删不完整的文件，此处调用不会误伤完好的预览。
+            remove_partial_file(pdf_path)
             return None
 
         # 使用 libreoffice 转换
@@ -631,26 +725,28 @@ def convert_to_pdf(input_file, output_dir):
         logger.info(f"开始转换文档：{filename}")
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
 
-        # 检查转换后的 PDF 文件是否存在（LibreOffice 可能返回非零退出码但实际转换成功）
-        pdf_filename = f"{name}.pdf"
-        pdf_path = os.path.join(output_dir, pdf_filename)
-
-        if os.path.exists(pdf_path):
+        # LibreOffice 可能返回非零退出码但实际转换成功，所以仍以文件为准；
+        # 但只检查 exists 会把被 kill 后截断的 PDF 当成成功，必须校验完整性
+        if is_valid_pdf(pdf_path):
             logger.info(f"文档转换成功：{pdf_path}")
             # 注意：图片预览由 api_upload() 统一生成，避免重复调用
             return pdf_path
-        else:
-            # 转换失败，记录详细错误
-            error_msg = result.stderr.strip() if result.stderr else "未知错误"
-            logger.error(f"文档转换失败：{error_msg}")
-            logger.error(f"PDF 文件不存在：{pdf_path}")
-            return None
+
+        # 转换失败，记录详细错误
+        error_msg = result.stderr.strip() if result.stderr else "未知错误"
+        logger.error(f"文档转换失败：{error_msg}")
+        logger.error(f"PDF 文件不存在或不完整：{pdf_path}")
+        # 可能残留半截 PDF，删掉，避免后续被 get_printable_file 当成可打印文件
+        remove_partial_file(pdf_path)
+        return None
 
     except subprocess.TimeoutExpired:
         logger.error("文档转换超时")
+        remove_partial_file(pdf_path)
         return None
     except Exception as e:
         logger.error(f"文档转换异常：{e}")
+        remove_partial_file(pdf_path)
         return None
 
 def convert_image_to_pdf(input_file, output_dir):
@@ -684,12 +780,18 @@ def convert_image_to_pdf(input_file, output_dir):
                 pdf_bytes = img2pdf.convert(f.read())
             with open(pdf_path, 'wb') as f:
                 f.write(pdf_bytes)
-            if os.path.exists(pdf_path):
+            # exists 不足以判定成功：写入中途失败（磁盘满等）会留下截断文件，
+            # 后续 get_printable_file 会把它当成可打印文件送去打印机
+            if is_valid_pdf(pdf_path):
                 logger.info(f"图片转换成功（img2pdf）：{pdf_path}")
                 return pdf_path
-            logger.error(f"图片转换失败（img2pdf），输出不存在：{pdf_path}")
+            logger.error(f"图片转换失败（img2pdf），输出不存在或不完整：{pdf_path}")
+            remove_partial_file(pdf_path)
         except Exception as e:
             logger.warning(f"img2pdf 转换失败（{e}），降级到 LibreOffice")
+            # 写入中途抛异常会留下半截 PDF，清掉后再走 fallback，
+            # 否则 LibreOffice 也失败时残留文件会被后续流程误用
+            remove_partial_file(pdf_path)
 
     # fallback：使用 LibreOffice
     logger.info(f"使用 LibreOffice 转换图片：{filename}")
@@ -714,7 +816,7 @@ def get_preview_file(original_filename):
     # 如果是 PDF，直接返回 previews/目录的 PDF
     if original_filename.lower().endswith('.pdf'):
         pdf_path = get_safe_path(app.config['PREVIEW_FOLDER'], original_filename)
-        if pdf_path and os.path.exists(pdf_path):
+        if pdf_path and is_valid_pdf(pdf_path):
             return pdf_path
         return None
 
@@ -722,7 +824,7 @@ def get_preview_file(original_filename):
     if is_image_file(original_filename) or is_document_file(original_filename):
         pdf_filename = os.path.splitext(original_filename)[0] + '.pdf'
         pdf_path = get_safe_path(app.config['PREVIEW_FOLDER'], pdf_filename)
-        if pdf_path and os.path.exists(pdf_path):
+        if pdf_path and is_valid_pdf(pdf_path):
             return pdf_path
         return None
 
@@ -787,6 +889,8 @@ def extract_pdf_pages_to_tmp(input_pdf, page_range):
     Returns:
         (pdf_path, error_message) 元组
     """
+    # 预先置空：异常分支要拿它清理残留的半截 PDF，不能未定义
+    output_pdf = None
     try:
         # 生成输出文件名到/tmp 目录
         base_name = os.path.splitext(os.path.basename(input_pdf))[0]
@@ -812,19 +916,25 @@ def extract_pdf_pages_to_tmp(input_pdf, page_range):
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
 
-        if result.returncode == 0 and os.path.exists(output_pdf):
+        # 退出码为 0 仍可能是被 kill 后的截断输出，校验完整性后再返回
+        if result.returncode == 0 and is_valid_pdf(output_pdf):
             logger.info(f"PDF 页面提取成功：{output_pdf}")
             return output_pdf, None
 
         error_msg = result.stderr.strip() if result.stderr else "未知错误"
         logger.error(f"PDF 页面提取失败：{error_msg}")
+        # 清掉可能残留的半截文件，避免它一直占着 /tmp
+        remove_partial_file(output_pdf)
         return None, f"PDF 页面提取失败：{error_msg}"
 
     except subprocess.TimeoutExpired:
         logger.error("PDF 页面提取超时")
+        # 超时被 kill 时 pdftk 可能已写出部分页面
+        remove_partial_file(output_pdf)
         return None, "PDF 页面提取超时"
     except Exception as e:
         logger.error(f"PDF 页面提取异常：{e}")
+        remove_partial_file(output_pdf)
         return None, f"PDF 页面提取异常：{str(e)}"
 
 
@@ -858,6 +968,13 @@ def get_printable_file(filepath, filename, page_range=None):
         logger.error(f"预览 PDF 不存在：{pdf_filename}，请重新上传")
         return None, f"预览文件不存在：{pdf_filename}，请重新上传", False
 
+    # 纵深防御：转换进程被 kill 或写入中断时，previews/ 里可能残留只写了一半的
+    # PDF。仅凭 exists 无法识别，直接送去 lp 会打出损坏文档。这里再校验一次结构
+    # 完整性，不合格就要求重新上传（api_upload 会据此覆盖掉损坏的预览文件）。
+    if not is_valid_pdf(pdf_path):
+        logger.error(f"预览 PDF 不完整（可能转换被中断）：{pdf_filename}，请重新上传")
+        return None, f"预览文件不完整：{pdf_filename}，请重新上传", False
+
     logger.info(f"使用预览 PDF: {pdf_path}")
     if page_range and page_range.strip():
         logger.info(f"从预览 PDF 提取页面范围：{page_range}")
@@ -868,7 +985,7 @@ def get_printable_file(filepath, filename, page_range=None):
     return pdf_path, None, False
 
 
-def submit_print_job(filepath, printer_name, color_mode='mono', duplex='one-sided', orientation='portrait', paper_size='A4', paper_type='plain', copies=1, page_range=None, mirror=False, print_scaling='fit'):
+def submit_print_job(filepath, printer_name, color_mode='mono', duplex='one-sided', orientation='portrait', paper_size='A4', paper_type='plain', copies=1, page_range=None, mirror=False, print_scaling='auto-fit'):
     """
     提交打印任务到CUPS
 
@@ -1557,7 +1674,10 @@ def api_upload():
                 # For PDFs, copy to previews and generate images
                 elif ext.lower().endswith('.pdf'):
                     pdf_path = os.path.join(app.config['PREVIEW_FOLDER'], pdf_filename)
-                    if not os.path.exists(pdf_path):
+                    # 用 is_valid_pdf 而非 exists：上一次复制被中断时 previews/ 里
+                    # 可能留着截断的同名 PDF，若跳过复制会让用户反复重传也修不好
+                    # （get_printable_file 会一直拒绝这个损坏文件）
+                    if not is_valid_pdf(pdf_path):
                         try:
                             shutil.copy2(filepath, pdf_path)
                             if token and _register_upload_file(token, pdf_path):
@@ -1568,7 +1688,7 @@ def api_upload():
                             logger.error(f"PDF 复制失败：{copy_error}")
                             conversion_warning = "PDF 复制失败，预览和打印将不可用，请联系管理员"
 
-                    if os.path.exists(pdf_path):
+                    if is_valid_pdf(pdf_path):
                         logger.info(f"PDF 文件，生成预览图片：{pdf_path}")
                         images = convert_pdf_to_images(pdf_path, app.config['PREVIEW_FOLDER'], pdf_filename=pdf_filename)
                         if token and images and _register_upload_files(token, images):
@@ -1761,6 +1881,13 @@ def api_list_files():
 @app.route('/api/files/<path:filename>', methods=['DELETE'])
 def api_delete_file(filename):
     """删除上传的文件"""
+    # 先取出纯文件名：路由用的是 <path:filename>，会保留 "/" 和 ".."。
+    # 后续删除预览 PDF、预览图片、/tmp 抽取文件都要用它拼路径或 glob，
+    # 若不先 basename，形如 "../secret/victim.pdf" 的请求会让 glob 解析到
+    # PREVIEW_FOLDER 之外，造成越界删除。get_safe_path 内部虽有 basename，
+    # 但只覆盖 filepath 这一处。
+    filename = os.path.basename(filename)
+
     # 获取安全的文件路径
     filepath = get_safe_path(app.config['UPLOAD_FOLDER'], filename)
     
@@ -1880,7 +2007,7 @@ def api_print():
         page_range = None
     
     mirror = data.get('mirror', False)
-    print_scaling = data.get('print_scaling', 'fit')
+    print_scaling = data.get('print_scaling', 'auto-fit')
 
     # 记录解析后的参数
     logger.info(f"解析后的参数:")

@@ -1,0 +1,41 @@
+# 版本控制
+.git
+.github
+.gitignore
+.dockerignore
+
+# 运行时产生的数据（目录由 app.py 的 os.makedirs 创建，
+# 且 Dockerfile 已声明为 VOLUME，挂载点会自动创建）
+uploads/*
+previews/*
+!uploads/.gitkeep
+!previews/.gitkeep
+
+# 随仓库分发的演示文件（demo）——保持打进镜像
+!uploads/demo_20260318_100521.doc
+!previews/demo_20260318_100521.pdf
+!previews/demo_20260318_100521-1.png
+!previews/demo_20260318_100521-2.png
+!previews/demo_20260318_100521-3.png
+!previews/demo_20260318_100521-4.png
+
+# 日志与缓存
+app.log
+*.log
+__pycache__/
+*.pyc
+*.pyo
+
+# 本地环境与编辑器配置
+.venv/
+venv/
+.env
+.idea/
+.vscode/
+.qwen/
+.claude/
+.opencode/
+*.bak
+
+# 文档（镜像内不需要）
+README.md
