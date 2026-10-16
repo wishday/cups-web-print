@@ -4,7 +4,8 @@ on:
   # 自动触发：推送 main 分支
   push:
     branches: [ "main" ]
-    # tags: [ 'v*.*.*' ]
+    # 推送版本标签时也触发（发版流程：git tag v1.84 && git push origin v1.84）
+    tags: [ 'v*.*.*' ]
     
    # 自动触发：拉取请求到 main 分支
   # pull_request:
@@ -44,6 +45,20 @@ jobs:
       - name: Read version from file
         run: echo "VERSION=$(cat version | tr -d '[:space:]')" >> "$GITHUB_ENV"
 
+      # 发版一致性校验：推送 git tag 时，tag 必须与 version 文件一致。
+      # 否则 semver 标签（来自 git tag）与 v{VERSION} 标签（来自 version 文件）
+      # 会指向不同代码，镜像标签语义混乱。
+      - name: Verify git tag matches version file
+        if: github.ref_type == 'tag'
+        run: |
+          EXPECTED="v${VERSION}"
+          ACTUAL="${GITHUB_REF_NAME}"
+          echo "git tag = ${ACTUAL} / version 文件 = ${EXPECTED}"
+          if [ "${ACTUAL}" != "${EXPECTED}" ]; then
+            echo "::error::git tag (${ACTUAL}) 与 version 文件 (${EXPECTED}) 不一致，请先更新 version 再打 tag"
+            exit 1
+          fi
+
       # 启用 QEMU 模拟，用于构建非原生架构（如 arm64 在 amd64 runner 上）
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4  
@@ -63,6 +78,26 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # 检查 v{VERSION} 标签在镜像仓库中是否已存在。
+      # Docker 标签是指向镜像摘要的可变指针：若该标签已存在还继续推送，
+      # 它会被挪到新镜像上，旧镜像随即失去唯一标签变成无标签镜像，
+      # 可能被 GHCR 的保留策略清理掉。因此已存在时本次跳过该标签。
+      - name: Check if version tag already exists
+        id: vtag
+        run: |
+          TOKEN=$(curl -fsS "https://ghcr.io/token?scope=repository:${IMAGE_NAME}:pull&service=ghcr.io" | jq -r '.token')
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json" \
+            "https://ghcr.io/v2/${IMAGE_NAME}/manifests/v${VERSION}")
+          if [ "${CODE}" = "200" ]; then
+            echo "tag_exists=true" >> "$GITHUB_OUTPUT"
+            echo "v${VERSION} 已存在（HTTP 200），本次不再推送该标签，以免覆盖原镜像"
+          else
+            echo "tag_exists=false" >> "$GITHUB_OUTPUT"
+            echo "v${VERSION} 尚不存在（HTTP ${CODE}），将由本次构建创建"
+          fi
+
       # 生成镜像元数据（标签、注解等）
       - name: Extract metadata (tags, labels)
         id: meta
@@ -73,7 +108,8 @@ jobs:
             # 默认标签：latest（始终存在）
             type=raw,value=latest
             # 来自根目录 version 文件的版本号标签，例如 v1.81
-            type=raw,value=v${{ env.VERSION }}
+            # 仅在该标签尚未存在时才生成，避免覆盖已有版本对应的镜像
+            ${{ steps.vtag.outputs.tag_exists == 'false' && format('type=raw,value=v{0}', env.VERSION) || '' }}
             # Git 分支名
             type=ref,event=branch
             # Git 提交 SHA（短格式）
@@ -98,8 +134,10 @@ jobs:
           platforms: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.platforms || 'linux/amd64,linux/arm64' }}
 
       # （可选）将镜像设置为公开，方便任何人拉取
+      # 补上 tag 发版场景：启用 tags 触发后，github.ref 变为 refs/tags/vX.Y.Z，
+      # 原条件会导致发版构建跳过本步骤
       - name: Make image public (optional)
-        if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+        if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref_type == 'tag'
         run: |
           curl -X PATCH \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
