@@ -1482,8 +1482,8 @@ def api_update_check():
 
 @app.route('/api/printers', methods=['GET'])
 def api_printers():
-    """获取可用打印机列表（支持异步探测模式）"""
-    # 始终使用快速模式（不进行在线探测），避免同步逐台探测阻塞请求
+    """获取可用打印机列表（仅本地枚举，不做在线探测；在线状态请调用 /api/printer/<name>/status）"""
+    # 快速模式（不进行在线探测），避免同步逐台探测阻塞请求
     printers = get_printers_fast()
 
     return jsonify({'printers': printers})
