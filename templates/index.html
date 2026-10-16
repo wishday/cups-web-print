@@ -681,10 +681,11 @@
 
             // 初始化
             (async () => {
+                // 并行发起：文件列表无需等待打印机/任务接口，避免被串行阻塞数秒
+                loadFiles().catch(e => console.error('初始加载文件列表失败:', e));
                 // 等待打印机列表加载完成
                 await loadPrinters();
                 await loadJobs();
-                await loadFiles();
 
                 // 延迟加载打印机信息，确保打印机已选择
                 setTimeout(async () => {
@@ -1245,8 +1246,8 @@
         async function loadPrinters() {
             console.log('开始加载打印机列表...');
             try {
-                // 第一步：快速加载打印机列表（异步模式，不等待探测）
-                const response = await fetch('/api/printers?async=true');
+                // 第一步：快速加载打印机列表（仅本地枚举，不做在线探测）
+                const response = await fetch('/api/printers');
 
                 if (!response.ok) {
                     throw new Error(`HTTP 错误：${response.status}`);
