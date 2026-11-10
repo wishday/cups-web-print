@@ -233,8 +233,8 @@ sudo netstat -tulpn | grep 5000
 # 防火墙放行端口（Ubuntu/Debian）
 sudo ufw allow 5000/tcp
 
-# 检查 Flask 绑定地址是否为 0.0.0.0（必须修改才能局域网访问）
-# 确保 app.py 中使用：app.run(host='0.0.0.0', port=5000)
+# 检查服务绑定地址是否为 0.0.0.0（必须修改才能局域网访问）
+# gunicorn 启动参数：--bind 0.0.0.0:5000；本地开发用：app.run(host='0.0.0.0', port=5000)
 ```
 
 ### 问题：打开页面列表无可用打印机
@@ -540,8 +540,8 @@ sudo netstat -tulpn | grep 5000
 # Allow port through firewall (Ubuntu/Debian)
 sudo ufw allow 5000/tcp
 
-# Check Flask binding address (must be 0.0.0.0 for LAN access)
-# Ensure app.py uses: app.run(host='0.0.0.0', port=5000)
+# Check the service bind address (must be 0.0.0.0 for LAN access)
+# gunicorn: --bind 0.0.0.0:5000; local development: app.run(host='0.0.0.0', port=5000)
 ```
 
 ### Issue: No available printers in page list
