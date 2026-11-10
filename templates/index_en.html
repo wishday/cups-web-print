@@ -1296,7 +1296,8 @@
                                 // 立即更新这一台打印机的显示
                                 const option = select.options[index];
                                 if (option) {
-                                    let statusDisplay = result.status || 'Unknown';
+                                    const statusLabels = { idle: 'Idle', printing: 'Printing', disabled: 'Disabled' };
+                                    let statusDisplay = statusLabels[result.status] || 'Unknown';
                                     if (result.online_status === 'online') {
                                         statusDisplay = 'Online';
                                     } else if (result.online_status === 'offline') {

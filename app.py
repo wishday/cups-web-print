@@ -273,6 +273,25 @@ def _lpstat(args, timeout=5):
     )
 
 
+def _parse_printer_state(lpstat_output):
+    """
+    将 lpstat -p 输出统一解析为 idle / printing / disabled / unknown。
+
+    CUPS 的实际输出为：
+    - "printer X is idle.  enabled since ..."
+    - "printer X now printing X-123.  enabled since ..."
+    - "printer X disabled since ... -"
+    """
+    text = (lpstat_output or '').lower()
+    if 'disabled' in text:
+        return 'disabled'
+    if 'now printing' in text:
+        return 'printing'
+    if 'is idle' in text:
+        return 'idle'
+    return 'unknown'
+
+
 # 自动恢复 CUPS 队列：记录每台打印机上次尝试恢复的时间，避免前端轮询时反复执行
 _printer_recover_lock = threading.Lock()
 _printer_last_recover_attempt = {}
@@ -399,17 +418,11 @@ def get_single_printer_status(printer_name, timeout=5):
             return None
         
         # 2. 获取 CUPS 队列状态
-        status = 'idle'
+        status = 'unknown'
         try:
             result = _lpstat(['-p', printer_name])
             if result.returncode == 0:
-                line = result.stdout.strip()
-                if 'is ready' in line.lower():
-                    status = 'ready'
-                elif 'is processing' in line.lower():
-                    status = 'processing'
-                elif 'is stopped' in line.lower():
-                    status = 'stopped'
+                status = _parse_printer_state(result.stdout)
         except Exception as e:
             logger.warning(f"获取打印机 {printer_name} 队列状态失败：{e}")
         
@@ -422,9 +435,6 @@ def get_single_printer_status(printer_name, timeout=5):
                     online_status = 'online'
                 else:
                     online_status = 'offline'
-                    # 如果探测离线，更新状态显示
-                    if status == 'idle':
-                        status = 'offline'
                 logger.debug(f"打印机 {printer_name} 在线检测：{probe_result}")
             except Exception as e:
                 logger.warning(f"打印机 {printer_name} 在线检测失败：{e}")
@@ -893,13 +903,7 @@ def get_printers_fast():
                     if len(parts) >= 2 and parts[0].lower() == 'printer':
                         printer_name = parts[1]
                         # 提取状态
-                        status = 'idle'
-                        if 'is ready' in line.lower():
-                            status = 'ready'
-                        elif 'is processing' in line.lower():
-                            status = 'processing'
-                        elif 'is stopped' in line.lower():
-                            status = 'stopped'
+                        status = _parse_printer_state(line)
 
                         # 获取打印机 URI
                         printer_uri = get_printer_uri(printer_name)
@@ -1474,13 +1478,7 @@ def get_printer_queue(printer_name):
         # 获取打印机状态
         printer_status = _lpstat(['-p', printer_name])
         if printer_status.returncode == 0:
-            status_line = printer_status.stdout.strip()
-            if "idle" in status_line.lower():
-                status = "idle"
-            elif "printing" in status_line.lower():
-                status = "printing"
-            elif "disabled" in status_line.lower():
-                status = "disabled"
+            status = _parse_printer_state(printer_status.stdout)
         else:
             logger.warning(f"获取打印机状态失败: {printer_status.stderr}")
     except Exception as e:
