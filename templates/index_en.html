@@ -745,12 +745,25 @@
             previewGeneration++;
             stopPreviewCheck();
 
+            // Selecting a new file immediately invalidates the previous selection:
+            // even if validation fails, the upload is in progress or it fails,
+            // the print button will never point to the previous file again.
+            uploadedFile = null;
+            currentPreviewImages = [];
+            updatePrintButton();
+            const stalePreviewContent = document.getElementById('previewContent');
+            const stalePreviewState = document.getElementById('previewState');
+            if (stalePreviewContent) stalePreviewContent.innerHTML = '';
+            if (stalePreviewState) stalePreviewState.classList.add('hidden');
+
             const ext = file.name.split('.').pop().toLowerCase();
             if (!ALLOWED_EXTENSIONS.includes(ext)) {
+                resetUploadUI();
                 showToast(`Unsupported format .${ext}, supported: ${ALLOWED_EXTENSIONS.join(', ')}`, 'error');
                 return;
             }
             if (file.size > UPLOAD_LIMIT) {
+                resetUploadUI();
                 showToast(`File too large (limit ${UPLOAD_LIMIT / 1024 / 1024}MB), current ${(file.size / 1024 / 1024).toFixed(1)}MB`, 'error');
                 return;
             }
@@ -759,10 +772,6 @@
             const uploadToken = 'up_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
             formData.append('file', file);
             formData.append('upload_token', uploadToken);
-
-            currentPreviewImages = [];
-            const previewContent = document.getElementById('previewContent');
-            if (previewContent) previewContent.innerHTML = '';
 
             const uploadState = document.getElementById('uploadState');
             const previewState = document.getElementById('previewState');

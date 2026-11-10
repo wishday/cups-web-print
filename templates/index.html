@@ -745,12 +745,24 @@
             previewGeneration++;
             stopPreviewCheck();
 
+            // 选择新文件的瞬间就作废旧选择：即使新文件校验失败、正在上传或上传失败，
+            // 打印按钮也不会再指向上一份文件，避免打错文档
+            uploadedFile = null;
+            currentPreviewImages = [];
+            updatePrintButton();
+            const stalePreviewContent = document.getElementById('previewContent');
+            const stalePreviewState = document.getElementById('previewState');
+            if (stalePreviewContent) stalePreviewContent.innerHTML = '';
+            if (stalePreviewState) stalePreviewState.classList.add('hidden');
+
             const ext = file.name.split('.').pop().toLowerCase();
             if (!ALLOWED_EXTENSIONS.includes(ext)) {
+                resetUploadUI();
                 showToast(`不支持的文件格式 .${ext}，支持：${ALLOWED_EXTENSIONS.join(', ')}`, 'error');
                 return;
             }
             if (file.size > UPLOAD_LIMIT) {
+                resetUploadUI();
                 showToast(`文件过大（限制 ${UPLOAD_LIMIT / 1024 / 1024}MB），当前 ${(file.size / 1024 / 1024).toFixed(1)}MB`, 'error');
                 return;
             }
@@ -759,10 +771,6 @@
             const uploadToken = 'up_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
             formData.append('file', file);
             formData.append('upload_token', uploadToken);
-
-            currentPreviewImages = [];
-            const previewContent = document.getElementById('previewContent');
-            if (previewContent) previewContent.innerHTML = '';
 
             const uploadState = document.getElementById('uploadState');
             const previewState = document.getElementById('previewState');
