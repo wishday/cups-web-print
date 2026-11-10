@@ -64,7 +64,7 @@
 - **打印服务**: CUPS 2.0+
 - **文档转换**: LibreOffice 6.0+
 - **PDF 处理**: poppler-utils (pdftoppm), pdftk
-- **IPP 协议**: ipptool (cups-client)
+- **IPP 协议**: ipptool (`cups-ipp-utils`，由 `cups` 依赖链自动安装)
 
 ## 部署指导-容器安装(推荐)
 ### 1. 部署容器
@@ -153,12 +153,13 @@ lpstat -p -v
 
 ### 4. 启动服务
 ```bash
-python3 app.py
+# 必须单 worker：任务/上传令牌/自动恢复状态都保存在进程内存中
+gunicorn --bind 0.0.0.0:5000 --workers 1 --threads 8 app:app
 
 #添加开机自启动后台运行(可选)
 crontab -e
 #添加以下一行(替换实际项目路径)
-@reboot nohup python3 /your-path-to/app.py > /dev/null 2>&1 &
+@reboot nohup gunicorn --chdir /your-path-to --bind 0.0.0.0:5000 --workers 1 --threads 8 app:app > /dev/null 2>&1 &
 
 ```
 
@@ -367,7 +368,7 @@ A web-based print service built with Python Flask and CUPS, supporting file uplo
 - **Print Service**: CUPS 2.0+
 - **Document Conversion**: LibreOffice 6.0+
 - **PDF Processing**: poppler-utils (pdftoppm), pdftk
-- **IPP Protocol**: ipptool (cups-client)
+- **IPP Protocol**: ipptool (`cups-ipp-utils`, pulled in automatically by `cups`)
 
 ## Deployment Guide - Container Installation (Recommended)
 
@@ -461,12 +462,13 @@ lpstat -p -v
 
 ### 4. Start Service
 ```bash
-python3 app.py
+# Must use a single worker: job/upload/recovery state lives in process memory
+gunicorn --bind 0.0.0.0:5000 --workers 1 --threads 8 app:app
 
 # Add auto-start on boot (optional)
 crontab -e
 # Add the following line (replace with actual project path)
-@reboot nohup python3 /your-path-to/app.py > /dev/null 2>&1 &
+@reboot nohup gunicorn --chdir /your-path-to --bind 0.0.0.0:5000 --workers 1 --threads 8 app:app > /dev/null 2>&1 &
 ```
 
 The service will start on `http://localhost:5000/en`

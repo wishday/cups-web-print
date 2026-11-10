@@ -668,7 +668,6 @@
                         console.error('定时加载打印机信息失败:', e);
                     }
                 }, 11000);
-                console.log('打印机信息定时器已重置');
             }
 
             // 打印机选择变化
@@ -693,9 +692,7 @@
 
                 // 延迟加载打印机信息，确保打印机已选择
                 setTimeout(async () => {
-                    console.log('开始加载打印机信息...');
                     await updatePrinterInfoDisplay();
-                    console.log('打印机信息加载完成');
                     // 启动定时器
                     resetPrinterInfoTimer();
                 }, 1000);
@@ -1021,13 +1018,11 @@
                         pdfLoaded = true;
                         hideLoading();
                         stopPreviewCheck();
-                        console.log('PDF 加载成功');
                     });
 
                     pdfObject.addEventListener('error', () => {
                         if (generation !== previewGeneration) return;
                         if (!pdfLoaded) {
-                            console.log('PDF 加载失败，自动切换图片预览');
                             hideLoading();
                             loadFallbackImages();
                         }
@@ -1037,7 +1032,6 @@
                 if (skipButton) {
                     skipButton.addEventListener('click', () => {
                         if (generation !== previewGeneration) return;
-                        console.log('用户手动跳过 PDF 加载');
                         loadFallbackImages();
                     });
                 }
@@ -1048,7 +1042,6 @@
                     if (generation !== previewGeneration) return;
                     if (!pdfLoaded) {
                         hideLoading();
-                        console.log('PDF 预览加载超时，可使用下方按钮打开或切换图片预览');
                     }
                 }, 8000);
             } else {
@@ -1065,7 +1058,6 @@
             // 如果有预览图片，显示图片预览
             // 注意：currentPreviewImages 可能为空（上传时转换失败），此时显示提示信息
             if (currentPreviewImages && currentPreviewImages.length > 0) {
-                console.log(`使用图片预览，共 ${currentPreviewImages.length} 页`);
 
                 let imagesHtml = '<div class="image-preview-container h-full bg-gray-50 relative">';
                 imagesHtml += '<div class="h-full overflow-y-auto pb-12">';
@@ -1294,7 +1286,6 @@
         }
 
         async function loadPrinters() {
-            console.log('开始加载打印机列表...');
             try {
                 // 第一步：快速加载打印机列表（仅本地枚举，不做在线探测）
                 const response = await fetch('/api/printers');
@@ -1304,7 +1295,6 @@
                 }
 
                 const data = await response.json();
-                console.log('打印机 API 响应:', data);
                 
                 const select = document.getElementById('printerSelect');
                 if (!select) {
@@ -1325,19 +1315,16 @@
 
                     // 自动选择第一台打印机
                     select.selectedIndex = 0;
-                    console.log(`成功加载 ${data.printers.length} 台打印机，开始并发探测状态...`);
 
                     // 第二步：并发请求每台打印机的在线状态，独立更新（不等待其他打印机）
                     data.printers.forEach((printer, index) => {
                         // 为每台打印机发起独立的异步请求
                         (async () => {
                             try {
-                                console.log(`正在探测打印机：${printer.name}`);
                                 const statusResp = await fetch(`/api/printer/${encodeURIComponent(printer.name)}/status`);
                                 let result;
                                 if (statusResp.ok) {
                                     result = await statusResp.json();
-                                    console.log(`打印机 ${printer.name} 状态响应:`, result);
                                 } else {
                                     console.warn(`打印机 ${printer.name} 状态 HTTP 错误：${statusResp.status}`);
                                     result = { name: printer.name, online_status: 'unknown', status: 'Unknown' };
@@ -1354,7 +1341,6 @@
                                         statusDisplay = 'Offline';
                                     }
                                     option.textContent = `${result.name} (${statusDisplay})`;
-                                    console.log(`打印机 ${result.name} 状态更新：${statusDisplay}`);
                                 }
                             } catch (e) {
                                 // 失败也立即更新为未知
@@ -1367,7 +1353,6 @@
                         })();
                     });
 
-                    console.log(`已发起 ${data.printers.length} 台打印机的状态探测（异步独立更新）`);
 
                     // 更新打印机信息显示
                     updatePrinterInfoDisplay();
@@ -1376,7 +1361,6 @@
                     option.value = '';
                     option.textContent = 'No printers detected';
                     select.appendChild(option);
-                    console.log('未检测到可用打印机');
                 }
                 updatePrintButton();
             } catch (error) {
@@ -1392,7 +1376,6 @@
                 }
                 showToast('Failed to load printer list, please check network connection', 'error');
             }
-            console.log('打印机列表加载完成');
         }
 
         function renderQueueHtml(queue, status) {
@@ -1478,11 +1461,9 @@
 
             const selectedPrinter = printerSelect.value;
             if (!selectedPrinter) {
-                console.log('updatePrinterInfoDisplay: 未选择打印机');
                 return;
             }
 
-            console.log(`updatePrinterInfoDisplay: 开始加载打印机 [${selectedPrinter}] 信息...`);
 
             // 记录当前请求时间戳
             const requestTimestamp = Date.now();
@@ -1490,7 +1471,6 @@
 
             try {
                 // 只获取当前选中打印机的详细信息
-                console.log(`updatePrinterInfoDisplay: 请求 /api/printer/${encodeURIComponent(selectedPrinter)}`);
                 const response = await fetch(`/api/printer/${encodeURIComponent(selectedPrinter)}`);
                 
                 if (!response.ok) {
@@ -1498,11 +1478,9 @@
                 }
                 
                 const printer = await response.json();
-                console.log(`updatePrinterInfoDisplay: 收到打印机数据:`, printer);
 
                 // 检查是否有更新的请求，如果有则跳过渲染（避免旧请求覆盖新数据）
                 if (window.lastPrinterInfoRequestTimestamp !== requestTimestamp) {
-                    console.log('检测到更新的请求，跳过旧数据渲染');
                     return;
                 }
 
@@ -1917,7 +1895,6 @@
 
 
         async function loadFiles() {
-            console.log('加载文件列表');
             try {
                 const response = await fetch('/api/files');
                 const data = await response.json();

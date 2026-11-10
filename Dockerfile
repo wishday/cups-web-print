@@ -27,7 +27,7 @@ RUN fc-cache -fv
 # ========== 备份默认 CUPS 配置 ==========
 RUN cp -r /etc/cups /etc/cups-default
 
-# 安装 Python 依赖（只有 Flask 和 Werkzeug，无需编译）
+# 安装 Python 依赖（Flask、gunicorn、img2pdf，均为纯 Python 包，无需编译）
 WORKDIR /app
 COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt

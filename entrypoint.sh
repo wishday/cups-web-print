@@ -45,7 +45,7 @@ gunicorn \
     app:app &
 APP_PID=$!
 
-# 定义清理函数（可选）
+# 清理函数：容器退出时同时停止 CUPS 和 Web 服务
 cleanup() {
     echo "Shutting down..."
     kill $CUPS_PID $APP_PID 2>/dev/null

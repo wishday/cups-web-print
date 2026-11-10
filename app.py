@@ -902,7 +902,7 @@ def get_preview_file(original_filename):
 
 
 def get_printers_fast():
-    """获取可用的 CUPS 打印机列表（快速版本，不进行在线探测）"""
+    """获取可用的 CUPS 打印机列表（不做 IPP 在线探测）"""
     try:
         result = _lpstat(['-p'])
         printers = []
@@ -2338,12 +2338,6 @@ def api_all_jobs():
     with print_jobs_lock:
         jobs = [_sanitize_job(j) for j in print_jobs.values()]
     return jsonify({'jobs': jobs})
-
-@app.route('/api/printer-queue/<printer_name>', methods=['GET'])
-def api_printer_queue(printer_name):
-    """获取特定打印机的队列信息"""
-    queue_info = get_printer_queue(printer_name)
-    return jsonify(queue_info)
 
 @app.route('/healthz')
 def healthz():
