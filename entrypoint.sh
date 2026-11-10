@@ -29,11 +29,23 @@ for i in {1..30}; do
     sleep 1
 done
 
-# 启动 Flask 应用
-python3 /app/app.py &
+# 启动 Web 服务（gunicorn）
+# 必须只用 1 个 worker：print_jobs、上传令牌、自动恢复冷却等状态都在进程内存中，
+# 多 worker 会导致状态分裂（任务查不到、取消无效、自动恢复互不可见）。
+# 并发能力由 --threads 提供。
+gunicorn \
+    --bind 0.0.0.0:5000 \
+    --workers 1 \
+    --threads 8 \
+    --timeout 300 \
+    --graceful-timeout 30 \
+    --access-logfile - \
+    --error-logfile - \
+    --chdir /app \
+    app:app &
 APP_PID=$!
 
-# 定义清理函数（可选）
+# 清理函数：容器退出时同时停止 CUPS 和 Web 服务
 cleanup() {
     echo "Shutting down..."
     kill $CUPS_PID $APP_PID 2>/dev/null

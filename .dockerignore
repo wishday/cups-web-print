@@ -39,3 +39,6 @@ venv/
 
 # 文档（镜像内不需要）
 README.md
+
+# README 截图（仅文档使用，页面只引用 favicon.png）
+static/*.jpg

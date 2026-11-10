@@ -4,5 +4,8 @@
 Flask>=3.0.0
 Werkzeug>=3.0.1
 
+# WSGI 服务器（生产环境替代 Flask 开发服务器）
+gunicorn>=22.0.0,<24
+
 # 图片转 PDF（无损，JPEG/PNG/GIF/BMP/TIFF 直接嵌入 PDF 流）
 img2pdf>=0.1.0
