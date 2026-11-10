@@ -338,6 +338,12 @@ def try_recover_disabled_printer(printer_name):
     return enable_printer_queue(printer_name)
 
 
+def _recover_cooldown_active(printer_name):
+    """冷却期内直接跳过，避免每次都先做昂贵的在线探测"""
+    with _printer_recover_lock:
+        return time.time() - _printer_last_recover_attempt.get(printer_name, 0) < PRINTER_RECOVER_COOLDOWN
+
+
 def is_safe_path(base_path, target_path):
     """
     检查目标路径是否在基础路径内，防止路径遍历攻击
@@ -1618,7 +1624,8 @@ def api_printer_detail(printer_name):
     if queue_info.get('status') in ('disabled', 'stopped'):
         printer_uri = printer_data.get('uri')
         is_online = False
-        if printer_uri and check_printer_online:
+        # 先查冷却再探测：队列持续停用时避免每轮轮询都执行最长数秒的在线探测
+        if printer_uri and check_printer_online and not _recover_cooldown_active(printer_name):
             try:
                 is_online = bool(check_printer_online(printer_uri, timeout=5).get('online'))
             except Exception as e:
