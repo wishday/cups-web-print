@@ -273,6 +273,52 @@ def _lpstat(args, timeout=5):
     )
 
 
+# 自动恢复 CUPS 队列：记录每台打印机上次尝试恢复的时间，避免前端轮询时反复执行
+_printer_recover_lock = threading.Lock()
+_printer_last_recover_attempt = {}
+PRINTER_RECOVER_COOLDOWN = 60  # 同一台打印机两次自动恢复的最小间隔（秒）
+
+
+def enable_printer_queue(printer_name):
+    """
+    重新启用被 CUPS 停用的打印队列。
+
+    打印过程中打印机断电/断网时，CUPS 后端会报错并按错误策略停用队列
+    （printers.conf 中记录 State Stopped），重启 cupsd 会重新加载该状态，
+    因此重启服务并不能恢复。cupsenable 发送 Resume-Printer 清除停用状态，
+    cupsaccept 确保队列继续接受任务。
+    """
+    errors = []
+    for command in ('cupsenable', 'cupsaccept'):
+        try:
+            result = subprocess.run(
+                [command, printer_name],
+                capture_output=True, text=True, timeout=10,
+                env={**os.environ, 'LC_ALL': 'C'}
+            )
+            if result.returncode != 0:
+                errors.append(f"{command}: {(result.stderr or result.stdout).strip()}")
+        except Exception as e:
+            errors.append(f"{command}: {e}")
+
+    if errors:
+        logger.warning(f"重新启用打印机 {printer_name} 失败：{'; '.join(errors)}")
+        return False
+
+    logger.info(f"已重新启用打印机 {printer_name} 的 CUPS 队列")
+    return True
+
+
+def try_recover_disabled_printer(printer_name):
+    """打印机在线但队列被停用时自动恢复（带冷却时间）"""
+    now = time.time()
+    with _printer_recover_lock:
+        if now - _printer_last_recover_attempt.get(printer_name, 0) < PRINTER_RECOVER_COOLDOWN:
+            return False
+        _printer_last_recover_attempt[printer_name] = now
+    return enable_printer_queue(printer_name)
+
+
 def is_safe_path(base_path, target_path):
     """
     检查目标路径是否在基础路径内，防止路径遍历攻击
@@ -1568,10 +1614,27 @@ def api_printer_detail(printer_name):
     
     # 获取打印队列
     queue_info = get_printer_queue(printer_name)
+
+    # 打印过程中打印机断电/重启会导致 CUPS 停用队列：设备重新在线后队列仍保持禁用，
+    # 表现为页面显示“已禁用”、新任务只排队不打印。检测到在线但队列被停用时自动恢复。
+    if queue_info.get('status') in ('disabled', 'stopped'):
+        printer_uri = printer_data.get('uri')
+        is_online = False
+        if printer_uri and check_printer_online:
+            try:
+                is_online = bool(check_printer_online(printer_uri, timeout=5).get('online'))
+            except Exception as e:
+                logger.warning(f"自动恢复前探测打印机 {printer_name} 在线状态失败：{e}")
+        if is_online:
+            logger.warning(f"打印机 {printer_name} 在线但 CUPS 队列已停用，尝试自动重新启用")
+            if try_recover_disabled_printer(printer_name):
+                time.sleep(0.3)
+                queue_info = get_printer_queue(printer_name)
+
     printer_data['queue'] = queue_info.get('queue', [])
     if queue_info.get('status') != 'unknown':
         printer_data['status'] = queue_info.get('status')
-    
+
     return jsonify(printer_data)
 
 @app.route('/api/upload-cancel/<token>', methods=['DELETE'])
