@@ -44,7 +44,14 @@ VOLUME ["/var/log/cups"]
 VOLUME ["/app/uploads"]
 VOLUME ["/app/previews"]
 
-# 启动服务：先启动 CUPS，再运行 Flask 应用
+# 启动服务：先启动 CUPS，再运行 Web 应用
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+
+# 健康检查：Web 服务可响应且 CUPS 守护进程可用
+# 使用 python3 而非 curl，避免额外安装依赖；start-period 覆盖 CUPS 启动等待
+# /healthz 返回 200 时退出 0；返回 503 或连接失败时 urlopen 抛异常，退出码非 0
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/healthz', timeout=4)"
+
 CMD ["/entrypoint.sh"]

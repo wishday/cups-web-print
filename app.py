@@ -2345,6 +2345,21 @@ def api_printer_queue(printer_name):
     queue_info = get_printer_queue(printer_name)
     return jsonify(queue_info)
 
+@app.route('/healthz')
+def healthz():
+    """容器健康检查：Web 服务可响应，且 CUPS 守护进程可用"""
+    try:
+        cups_ok = subprocess.run(
+            ['lpstat', '-r'], capture_output=True, timeout=3
+        ).returncode == 0
+    except Exception:
+        cups_ok = False
+    return jsonify({
+        'status': 'ok' if cups_ok else 'degraded',
+        'cups': cups_ok
+    }), (200 if cups_ok else 503)
+
+
 if __name__ == '__main__':
     print("=" * 60)
     print("Web 打印服务启动中...")
