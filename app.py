@@ -514,22 +514,29 @@ def safe_filename(filename, allowed_extensions):
         return None
 
     # 4. 清理文件名中的非法字符（保留中文、英文、数字、下划线、连字符、空格、括号等）
-    # 移除路径分隔符和控制字符
-    illegal_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|', '[', ']', ';', '\x00']
+    # 移除路径分隔符；控制字符（含换行/制表符）统一过滤，避免污染日志和 CUPS 标题
+    illegal_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|', '[', ']', ';']
     safe_name = name_part
     for char in illegal_chars:
         safe_name = safe_name.replace(char, '')
+    safe_name = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', safe_name)
 
     # 移除 '..' 防止路径遍历
     safe_name = safe_name.replace('..', '')
+    # 去掉首尾的点和空格，避免隐藏文件及 Windows 共享上的异常文件名
+    safe_name = safe_name.strip(' .')
 
     # 5. 如果文件名为空，直接拒绝
-    if not safe_name.strip():
+    if not safe_name:
         return None
 
-    # 6. 限制文件名长度（避免文件系统限制）
-    if len(safe_name) > 200:
-        safe_name = safe_name[:200]
+    # 6. 按 UTF-8 字节数限制长度（200 字节为时间戳和扩展名预留空间，
+    #    避免 200 个中文字符超过 255 字节触发 ENAMETOOLONG）
+    max_bytes = 200
+    if len(safe_name.encode('utf-8')) > max_bytes:
+        safe_name = safe_name.encode('utf-8')[:max_bytes].decode('utf-8', 'ignore').rstrip(' .')
+        if not safe_name:
+            return None
 
     return f"{safe_name}{ext}"
 
@@ -1173,27 +1180,23 @@ def submit_print_job(filepath, printer_name, color_mode='mono', duplex='one-side
             env={**os.environ, 'LC_ALL': 'C'}
         )
 
-        # 提取CUPS任务ID
+        # 提取CUPS任务ID，格式通常是 "request id is PDF_Printer-1 (1 file(s))"
         cups_job_id = None
         if result.returncode == 0:
-            # 从输出中提取任务ID，格式通常是 "request id is PDF_Printer-1 (1 file(s))"
-            output = result.stdout.strip()
-            if 'request id' in output.lower():
-                # 提取包含打印机名称和任务ID的部分
-                words = output.split()
-                for word in words:
-                    # 查找格式为 "PrinterName-123" 的词
-                    if '-' in word:
-                        parts = word.split('-')
-                        if len(parts) >= 2:
-                            # 检查最后一部分是否为纯数字（任务ID）
-                            potential_id = parts[-1]
-                            if potential_id.isdigit():
-                                cups_job_id = potential_id
-                                break
-
+            match = re.search(r'request id is .+-(\d+)', result.stdout, re.IGNORECASE)
+            if match:
+                cups_job_id = match.group(1)
+            else:
+                logger.warning(f"lp 输出中未找到任务 ID：{result.stdout.strip()}")
 
         # 更新任务状态
+        if result.returncode == 0:
+            job_status = 'submitted' if cups_job_id else 'unknown'
+            job_message = result.stdout if cups_job_id else 'CUPS 未返回可识别的任务 ID，请到打印机确认任务是否已提交'
+        else:
+            job_status = 'failed'
+            job_message = result.stderr
+
         with print_jobs_lock:
             print_jobs[job_id] = {
                 'id': job_id,
@@ -1210,13 +1213,13 @@ def submit_print_job(filepath, printer_name, color_mode='mono', duplex='one-side
                 'print_scaling': print_scaling,
                 'mirror': mirror,
                 'actual_print_file': actual_print_file,
-                'status': 'submitted' if result.returncode == 0 else 'failed',
-                'message': result.stdout if result.returncode == 0 else result.stderr,
+                'status': job_status,
+                'message': job_message,
                 'timestamp': datetime.now().isoformat(),
                 'progress': 0
             }
 
-        if result.returncode == 0:
+        if result.returncode == 0 and cups_job_id:
             # 启动后台线程监控进度
             logger.info(f"启动监控线程：job_id={job_id}, cups_job_id={cups_job_id}, printer_name={printer_name}")
             monitor_thread = threading.Thread(
@@ -1328,6 +1331,10 @@ def monitor_job_progress(job_id, cups_job_id, printer_name):
 
         if cups_job_id is None:
             logger.warning(f"任务 {job_id} 缺少 CUPS job ID，无法跟踪进度，放弃监控")
+            with print_jobs_lock:
+                if job_id in print_jobs and print_jobs[job_id].get('status') == 'submitted':
+                    print_jobs[job_id]['status'] = 'unknown'
+                    print_jobs[job_id]['message'] = 'CUPS 未返回可识别的任务 ID，无法跟踪进度'
             break
 
         elapsed_time = time.time() - start_time
@@ -1432,7 +1439,10 @@ def cleanup_temp_file(job_id):
     """
     清理打印任务的临时文件
 
-    只清理 /tmp 目录下的临时文件，previews 目录的文件保留
+    只清理 /tmp 目录下的临时文件，previews 目录的文件保留。
+
+    注意：失败/取消/超时等任务不在此清理临时文件，保留它们是为了让用户可以直接重试；
+    这些文件会在用户删除对应的上传文件时，由 api_delete_file 中的 glob 逻辑统一清理。
     """
     with print_jobs_lock:
         if job_id not in print_jobs:
@@ -1458,25 +1468,39 @@ def get_printer_queue(printer_name):
     status = "unknown"
     
     try:
-        # 获取打印队列
-        result = _lpstat(['-o'])
+        # 使用 -l 获取长格式，其中的 "File:" 行才是真实文件名。
+        # 注意：普通 lpstat -o 的输出为 "printer-123 user size 日期 时间"，
+        # 其中并没有文件名，不能把日期字段当文件名。
+        result = _lpstat(['-l', '-o'])
         if result.returncode == 0 and result.stdout.strip():
-            lines = result.stdout.strip().split('\n')
-            for line in lines:
-                if line.strip():
-                    # lpstat -o 输出格式: "printer-name-123    username    1024   filename"
-                    parts = [part for part in line.split() if part]
-                    if len(parts) >= 4:
-                        # 第一部分是 printer-jobID
-                        job_info = parts[0]
-                        # 检查是否属于指定打印机
-                        if job_info.startswith(f"{printer_name}-"):
-                            queue.append({
-                                'job_id': job_info.split('-')[-1],
-                                'user': parts[1],
-                                'size': parts[2],
-                                'filename': ' '.join(parts[3:])
-                            })
+            lines = result.stdout.split('\n')
+            current = None
+            for raw_line in lines:
+                if not raw_line.strip():
+                    continue
+                if not raw_line[0].isspace():
+                    # 任务头：printer-123 user size 日期 时间
+                    parts = raw_line.split()
+                    match = re.match(rf'^{re.escape(printer_name)}-(\d+)$', parts[0])
+                    if match:
+                        job_id = match.group(1)
+                        current = {
+                            'job_id': job_id,
+                            'user': parts[1] if len(parts) > 1 else '',
+                            'size': parts[2] if len(parts) > 2 else '',
+                            # 没有 File: 信息时回退到任务号，避免展示错误内容
+                            'filename': f'#{job_id}'
+                        }
+                        queue.append(current)
+                    else:
+                        current = None
+                elif current is not None:
+                    # 任务详情行：File: /path/to/file.pdf
+                    field = raw_line.strip()
+                    if field.lower().startswith('file:'):
+                        value = field.split(':', 1)[1].strip()
+                        if value:
+                            current['filename'] = os.path.basename(value)
     except Exception as e:
         logger.error(f"获取打印队列失败: {e}")
     
@@ -1674,9 +1698,6 @@ def api_upload():
     
     if file and allowed_file(file.filename):
         token = request.form.get('upload_token', '')
-        if token:
-            with _upload_tokens_lock:
-                _upload_tokens[token] = {'cancelled': False, 'files': []}
 
         try:
             # 获取文件名和扩展名（使用自定义 safe_filename 保留中文等非ASCII字符）
@@ -1691,10 +1712,33 @@ def api_upload():
             filename = f"{name}_{timestamp}{ext}"
             
             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            file.save(filepath)
+
+            # 文件名校验通过后才登记 token，避免非法请求把 token 永久留在字典里；
+            # 使用 setdefault 而不是覆盖，避免重复 token 让旧 entry 的文件失去引用。
+            if token:
+                with _upload_tokens_lock:
+                    _upload_tokens.setdefault(token, {'cancelled': False, 'files': []})
+
+            try:
+                file.save(filepath)
+            except Exception:
+                # save 过程中可能已写出半截文件，此时路径还未注册，需要显式删除
+                if os.path.exists(filepath):
+                    try:
+                        os.remove(filepath)
+                    except Exception as cleanup_error:
+                        logger.warning(f"删除半截上传文件失败：{filepath}, {cleanup_error}")
+                raise
 
             if token and _register_upload_file(token, filepath):
                 _cleanup_upload(token)
+                # token 可能在并发取消时已被移除，_cleanup_upload 找不到 entry，
+                # 这里再兜底删除本次刚写入的文件
+                if os.path.exists(filepath):
+                    try:
+                        os.remove(filepath)
+                    except Exception as cleanup_error:
+                        logger.warning(f"删除已取消的上传文件失败：{filepath}, {cleanup_error}")
                 return jsonify({'error': '上传已取消'}), 499
             
             # All file types: trigger conversion to PDF and generate preview images
@@ -2047,13 +2091,18 @@ def api_print():
     logger.info(f"原始数据: {request.data}")
 
     try:
-        data = request.json
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            logger.error("打印请求体不是 JSON 对象")
+            return jsonify({'error': '请求数据必须是 JSON 对象'}), 400
         logger.info(f"解析后的JSON: {json.dumps(data, indent=2, ensure_ascii=False)}")
     except Exception as e:
         logger.error(f"JSON解析失败: {e}")
         return jsonify({'error': '请求数据格式错误'}), 400
 
     filename = data.get('filename', data.get('filepath'))
+    if filename is not None and not isinstance(filename, str):
+        return jsonify({'error': 'filename 必须是字符串'}), 400
     if filename:
         filename = os.path.basename(filename)
     filepath = get_safe_path(app.config['UPLOAD_FOLDER'], filename) if filename else None
@@ -2062,6 +2111,8 @@ def api_print():
         return jsonify({'error': '非法文件路径'}), 403
 
     printer_name = data.get('printer')
+    if printer_name is not None and not isinstance(printer_name, str):
+        return jsonify({'error': 'printer 必须是字符串'}), 400
     color_mode = data.get('color_mode', 'mono')  # 默认改为mono（黑白）
     duplex = data.get('duplex', 'one-sided')
     orientation = data.get('orientation', 'portrait')
@@ -2069,6 +2120,8 @@ def api_print():
     paper_type = data.get('paper_type', 'plain')
     copies = data.get('copies', 1)  # Default to int, not string
     page_range = data.get('page_range', None)
+    if page_range is not None and not isinstance(page_range, str):
+        return jsonify({'error': 'page_range 必须是字符串'}), 400
     
     # 空字符串视为 None（无页面范围限制）
     if page_range is not None and not page_range.strip():
@@ -2097,19 +2150,28 @@ def api_print():
         return jsonify({'error': '缺少必要参数'}), 400
 
     # 防御性校验打印机名格式（即使后续 CUPS 列表校验被跳过，也拒绝畸形名，避免异常值传入 lp）
-    if not re.match(r'^[A-Za-z0-9_.\-]+$', printer_name or ''):
+    # 禁止前导 '-'，防止打印机名被当作命令行选项；长度限制避免异常超长参数
+    if not re.match(r'^(?!-)[A-Za-z0-9_.\-]{1,127}$', printer_name or ''):
         logger.warning(f"打印机名包含非法字符：{printer_name}")
         return jsonify({'error': '打印机名称包含非法字符'}), 400
 
     # 校验打印机必须存在于 CUPS 打印机列表（防止提交到不存在的队列/注入）
     try:
         available_printers = {p['name'] for p in get_printers_fast()}
-        if available_printers and printer_name not in available_printers:
-            logger.warning(f"打印请求使用了不存在的打印机：{printer_name}")
-            return jsonify({'error': f'打印机不存在：{printer_name}'}), 400
     except Exception as e:
-        # 获取打印机列表失败时放行（fail-open），避免偶发子进程错误影响正常打印
-        logger.warning(f"校验打印机列表失败，跳过校验：{e}")
+        # 获取打印机列表失败时拒绝请求（fail-closed），避免绕过队列存在性校验
+        logger.error(f"校验打印机列表失败：{e}")
+        return jsonify({'error': '无法获取打印机列表，请稍后重试'}), 503
+
+    if not available_printers:
+        # get_printers_fast 内部会吞掉 CUPS 异常并返回空列表，
+        # 因此空列表按“无法获取列表”处理，避免把 CUPS 故障误报成打印机不存在
+        logger.error("CUPS 打印机列表为空，无法校验打印请求")
+        return jsonify({'error': '无法获取打印机列表，请稍后重试'}), 503
+
+    if printer_name not in available_printers:
+        logger.warning(f"打印请求使用了不存在的打印机：{printer_name}")
+        return jsonify({'error': f'打印机不存在：{printer_name}'}), 400
 
     if not os.path.exists(filepath):
         return jsonify({'error': '文件不存在'}), 404
@@ -2184,9 +2246,9 @@ def api_cancel_job(job_id):
             return jsonify({'error': '任务不存在'}), 404
         job = print_jobs[job_id].copy()
 
-    # 检查任务状态
-    if job['status'] in ['completed', 'failed', 'cancelled']:
-        # 已完成、失败或已取消的任务，先清理临时文件，再删除
+    # 已完成、失败、已取消、超时、状态未知或出错的任务，监控已经结束，直接删除记录
+    if job['status'] in ['completed', 'failed', 'cancelled', 'timeout', 'unknown', 'error']:
+        # 先清理临时文件，再删除
         cleanup_temp_file(job_id)
         with print_jobs_lock:
             if job_id in print_jobs:
@@ -2196,10 +2258,6 @@ def api_cancel_job(job_id):
             'success': True,
             'message': '任务记录已删除'
         })
-
-    # 检查任务是否已经结束（错误状态）
-    if job['status'] == 'error':
-        return jsonify({'error': f'任务处于错误状态，无法取消'}), 400
 
     # 保存当前进度
     current_progress = job.get('progress', 0)
@@ -2242,23 +2300,13 @@ def api_cancel_job(job_id):
                     'message': '打印任务已取消，5 秒后从列表删除'
                 })
             else:
-                # CUPS 取消失败，但本地标记为已取消
+                # CUPS 取消失败：不要假装取消成功，否则页面显示已取消但打印机仍在出纸。
+                # 保持任务记录不变，交给监控线程继续跟踪真实状态。
                 logger.warning(f"CUPS 取消任务失败：{result.stderr}")
-                with print_jobs_lock:
-                    if job_id in print_jobs:
-                        print_jobs[job_id]['status'] = 'cancelled'
-                        print_jobs[job_id]['progress'] = current_progress
-                        print_jobs[job_id]['message'] = f'任务已取消 (CUPS 取消失败，但本地已标记为取消)'
-                # 清理临时文件
-                cleanup_temp_file(job_id)
-                # 启动后台线程，5 秒后删除任务
-                remove_thread = threading.Thread(target=remove_job_after_delay, args=(job_id, 5))
-                remove_thread.daemon = True
-                remove_thread.start()
                 return jsonify({
-                    'success': True,
-                    'message': '任务已标记为取消（CUPS 可能已完成），5 秒后从列表删除'
-                })
+                    'success': False,
+                    'error': f'CUPS 取消失败：{result.stderr.strip() or "任务可能已完成或已被删除"}'
+                }), 409
         except Exception as e:
             logger.error(f"取消任务异常：{e}")
             return jsonify({
