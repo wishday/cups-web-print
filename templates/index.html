@@ -622,6 +622,8 @@
             if (removeFileBtn) {
                 removeFileBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
+                    previewGeneration++;
+                    stopPreviewCheck();
                     uploadedFile = null;
                     if (fileInput) fileInput.value = '';
                     if (uploadState) uploadState.classList.remove('hidden');
@@ -672,7 +674,8 @@
             const printerSelect = document.getElementById('printerSelect');
             if (printerSelect) {
                 printerSelect.addEventListener('change', () => {
-                    // 切换打印机时更新所有信息
+                    // 切换打印机时先清空旧数据，避免显示上一台打印机的信息
+                    setPrinterPanelsState('loading');
                     updatePrinterInfoDisplay();
                     // 重置定时器，避免短时间内重复请求
                     resetPrinterInfoTimer();
@@ -719,7 +722,7 @@
                 clearInterval(jobsTimerId);
                 clearInterval(filesTimerId);
                 clearInterval(printerInfoTimerId);
-                if (previewCheckInterval) clearInterval(previewCheckInterval);
+                stopPreviewCheck();
             });
 
             // 定时刷新打印机信息（队列、墨盒、纸盒、打印机信息）- 每 11 秒
@@ -739,6 +742,8 @@
                 currentUploadXhr.abort();
                 currentUploadXhr = null;
             }
+            previewGeneration++;
+            stopPreviewCheck();
 
             const ext = file.name.split('.').pop().toLowerCase();
             if (!ALLOWED_EXTENSIONS.includes(ext)) {
@@ -875,19 +880,25 @@
 
         // 存储当前文件的预览图片信息
         let currentPreviewImages = [];
-        let previewCheckInterval = null;
+        let previewLoadTimeout = null;
+        let previewGeneration = 0;
 
-        // 停止预览轮询定时器（PDF 加载成功 / 失败切图片 / 页面切换时调用）
+        // 停止预览超时兜底（PDF 加载成功 / 失败切图片 / 页面切换时调用）
+        // 避免旧预览的异步回调作用到新文件上
         function stopPreviewCheck() {
-            if (previewCheckInterval) {
-                clearInterval(previewCheckInterval);
-                previewCheckInterval = null;
+            if (previewLoadTimeout) {
+                clearTimeout(previewLoadTimeout);
+                previewLoadTimeout = null;
             }
         }
 
         async function loadPreview(filename, previewImages = null) {
             const previewContent = document.getElementById('previewContent');
             if (!previewContent) return;
+
+            // 每次加载生成新代次，异步回调执行前校验，防止旧预览覆盖新文件
+            const generation = ++previewGeneration;
+            stopPreviewCheck();
 
             const ext = filename.split('.').pop().toLowerCase();
 
@@ -903,6 +914,44 @@
             if (ALLOWED_EXTENSIONS.includes(ext)) {
                 // PDF 和文档类型：优先尝试 PDF 内嵌显示，失败则降级为图片预览
                 const previewUrl = `/api/preview/${encodeURIComponent(filename)}`;
+
+                // 先确认预览文件可用，避免 <object> 加载 404 时只显示空白
+                let previewAvailable = false;
+                try {
+                    const headResponse = await fetch(previewUrl, { method: 'HEAD' });
+                    previewAvailable = headResponse.ok;
+                } catch (error) {
+                    console.error('检查预览文件失败:', error);
+                }
+
+                // 期间用户已选择其他文件，丢弃本次结果
+                if (generation !== previewGeneration) return;
+
+                const fallbackButtons = `
+                    <a href="${previewUrl}" target="_blank" class="inline-flex items-center gap-2 bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg transition">
+                        <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
+                        </svg>
+                        在新标签页打开
+                    </a>
+                    <button onclick="loadFallbackImages()" class="inline-flex items-center gap-2 bg-gray-500 hover:bg-gray-600 text-white px-4 py-2 rounded-lg transition">
+                        <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+                        </svg>
+                        显示图片预览
+                    </button>
+                `;
+
+                if (!previewAvailable) {
+                    previewContent.innerHTML = `
+                        <div class="flex flex-col items-center justify-center h-full bg-gray-50 text-center px-4">
+                            <p class="mb-2 text-gray-700 font-medium">预览文件不可用</p>
+                            <p class="mb-4 text-sm text-gray-500">PDF 预览可能尚未生成，或原文件已被删除</p>
+                            <div class="flex flex-wrap gap-3 justify-center">${fallbackButtons}</div>
+                        </div>
+                    `;
+                    return;
+                }
 
                 previewContent.innerHTML = `
                     <div id="loadingIndicator" class="absolute inset-0 flex items-center justify-center bg-gray-50 z-10">
@@ -927,82 +976,60 @@
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
                             </svg>
                             <p class="mb-2 text-gray-700 font-medium">您的浏览器不支持内嵌 PDF 预览</p>
-                            <p class="mb-4 text-sm text-gray-500">请选择以下方式查看</p>
-                            <div class="flex flex-wrap gap-3 justify-center">
-                                <a href="${previewUrl}" target="_blank" class="inline-flex items-center gap-2 bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg transition">
-                                    <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
-                                    </svg>
-                                    在新标签页打开
-                                </a>
-                                <button onclick="loadFallbackImages()" class="inline-flex items-center gap-2 bg-gray-500 hover:bg-gray-600 text-white px-4 py-2 rounded-lg transition">
-                                    <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
-                                    </svg>
-                                    显示图片预览
-                                </button>
-                            </div>
+                            <p class="mb-4 text-sm text-gray-500">可使用下方按钮打开或切换为图片预览</p>
                         </div>
                     </object>
+                    <div class="flex flex-wrap gap-3 justify-center p-3 border-t border-gray-200 bg-white">
+                        ${fallbackButtons}
+                    </div>
                 `;
 
-                // 延迟检测加载状态（组合方案）
-                setTimeout(() => {
-                    const pdfObject = document.getElementById('pdfObject');
-                    const loadingIndicator = document.getElementById('loadingIndicator');
+                const pdfObject = document.getElementById('pdfObject');
+                const loadingIndicator = document.getElementById('loadingIndicator');
+                const skipButton = document.getElementById('skipPdfLoad');
 
-                    if (!pdfObject || !loadingIndicator) return;
+                const hideLoading = () => {
+                    if (loadingIndicator) loadingIndicator.classList.add('hidden');
+                };
 
-                    let pdfLoaded = false;
+                let pdfLoaded = false;
 
-                    // 方案 1: 监听 error 事件（自动切换图片预览）
-                    pdfObject.addEventListener('error', () => {
-                        if (!pdfLoaded) {
-                            console.log('PDF 加载失败，自动切换图片预览');
-                            loadFallbackImages();
-                        }
-                    });
-
-                    // 方案 2: 监听 load 事件（成功检测）
+                if (pdfObject) {
                     pdfObject.addEventListener('load', () => {
+                        if (generation !== previewGeneration) return;
                         pdfLoaded = true;
-                        loadingIndicator.classList.add('hidden');
+                        hideLoading();
                         stopPreviewCheck();
                         console.log('PDF 加载成功');
                     });
 
-                    // 方案 3: 尺寸检测（兜底）
-                    stopPreviewCheck();
-                    let previewCheckTicks = 0;
-                    previewCheckInterval = setInterval(() => {
-                        try {
-                            if (++previewCheckTicks > 24) {
-                                stopPreviewCheck();
-                                return;
-                            }
-                            const width = pdfObject.clientWidth;
-                            const height = pdfObject.clientHeight;
-
-                            if (width > 0 && height > 0 && width > 50 && height > 50) {
-                                pdfLoaded = true;
-                                stopPreviewCheck();
-                                loadingIndicator.classList.add('hidden');
-                                console.log('PDF 加载成功（尺寸检测）');
-                            }
-                        } catch (e) {
-                            console.error('检查 PDF 加载状态出错:', e);
-                        }
-                    }, 500);
-
-                    // 方案 4: 跳过按钮事件监听（用户主动选择）
-                    const skipButton = document.getElementById('skipPdfLoad');
-                    if (skipButton) {
-                        skipButton.addEventListener('click', () => {
-                            console.log('用户手动跳过 PDF 加载');
+                    pdfObject.addEventListener('error', () => {
+                        if (generation !== previewGeneration) return;
+                        if (!pdfLoaded) {
+                            console.log('PDF 加载失败，自动切换图片预览');
+                            hideLoading();
                             loadFallbackImages();
-                        });
+                        }
+                    });
+                }
+
+                if (skipButton) {
+                    skipButton.addEventListener('click', () => {
+                        if (generation !== previewGeneration) return;
+                        console.log('用户手动跳过 PDF 加载');
+                        loadFallbackImages();
+                    });
+                }
+
+                // 兜底：部分浏览器不会触发 <object> 的 load 事件
+                // 超时只收起加载提示，不再用尺寸误判为“加载成功”
+                previewLoadTimeout = setTimeout(() => {
+                    if (generation !== previewGeneration) return;
+                    if (!pdfLoaded) {
+                        hideLoading();
+                        console.log('PDF 预览加载超时，可使用下方按钮打开或切换图片预览');
                     }
-                }, 300);
+                }, 8000);
             } else {
                 previewContent.innerHTML = `<div class="flex items-center justify-center h-full text-gray-500">暂不支持此文件格式预览</div>`;
             }
@@ -1124,12 +1151,12 @@
 
                 if (data.success) {
                     showToast('打印任务提交成功', 'success');
-                    // 显示打印参数详情
+                    loadJobs();
+                    resetForm();
+                    // 显示打印参数详情（必须在 resetForm 之后，否则会被隐藏）
                     if (data.job) {
                         showPrintParams(data.job);
                     }
-                    loadJobs();
-                    resetForm();
                 } else {
                     showToast('提交失败: ' + data.error, 'error');
                 }
@@ -1138,14 +1165,16 @@
                 showToast('提交失败: ' + error.message, 'error');
             } finally {
                 if (btn) {
-                    btn.disabled = false;
                     btn.textContent = '🖨️ 提交打印';
+                    updatePrintButton();
                 }
             }
         }
 
         function resetForm() {
             uploadedFile = null;
+            previewGeneration++;
+            stopPreviewCheck();
             const fileInput = document.getElementById('fileInput');
             const uploadState = document.getElementById('uploadState');
             const previewState = document.getElementById('previewState');
@@ -1403,6 +1432,21 @@
         // 更新打印机信息显示（队列、纸盒、墨盒）- 调用 API 获取最新数据
         // 使用全局变量存储时间戳（避免闭包作用域问题）
         window.lastPrinterInfoRequestTimestamp = 0;
+
+        // 切换打印机时先占位，避免把上一台打印机的数据误认为当前打印机
+        function setPrinterPanelsState(state) {
+            const loading = state === 'loading';
+            const message = loading
+                ? '正在加载...'
+                : '加载失败，<button onclick="updatePrinterInfoDisplay()" class="text-blue-500 underline">点击重试</button>';
+            const colorClass = loading ? 'text-gray-500' : 'text-red-500';
+            ['printerQueueInfo', 'printerTrayInfo', 'printerInkInfo', 'printerInfo'].forEach((id) => {
+                const el = document.getElementById(id);
+                if (el) {
+                    el.innerHTML = `<div class="text-sm ${colorClass} text-center py-2">${message}</div>`;
+                }
+            });
+        }
 
         async function updatePrinterInfoDisplay() {
             const printerSelect = document.getElementById('printerSelect');
@@ -1843,6 +1887,10 @@
         } catch (error) {
             console.error('加载打印机信息失败:', error);
             console.error('错误堆栈:', error.stack);
+            const printerSelect = document.getElementById('printerSelect');
+            if (printerSelect && printerSelect.value === selectedPrinter) {
+                setPrinterPanelsState('error');
+            }
         }
         }
 
@@ -1923,6 +1971,10 @@
 
                 if (data.success) {
                     showToast('文件删除成功', 'success');
+                    // 删除的是当前选中文件时，必须同步清空表单和预览，否则会打印已删除的文件
+                    if (uploadedFile && uploadedFile.filename === filename) {
+                        resetForm();
+                    }
                     loadFiles();
                 } else {
                     showToast('删除失败: ' + data.error, 'error');
