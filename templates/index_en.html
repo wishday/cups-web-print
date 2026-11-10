@@ -443,6 +443,7 @@
         }
         let uploadedFile = null;
         let currentUploadXhr = null;
+        let currentUploadToken = null;
         let jobs = [];
         let jobsTimerId = null;
         let filesTimerId = null;
@@ -741,6 +742,12 @@
             if (currentUploadXhr) {
                 currentUploadXhr.abort();
                 currentUploadXhr = null;
+                // Also tell the server to cancel: aborting only the client request
+                // may leave an orphaned file and token if the server already finished.
+                if (currentUploadToken) {
+                    fetch('/api/upload-cancel/' + currentUploadToken, { method: 'DELETE' }).catch(function() {});
+                    currentUploadToken = null;
+                }
             }
             previewGeneration++;
             stopPreviewCheck();
@@ -772,6 +779,7 @@
             const uploadToken = 'up_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
             formData.append('file', file);
             formData.append('upload_token', uploadToken);
+            currentUploadToken = uploadToken;
 
             const uploadState = document.getElementById('uploadState');
             const previewState = document.getElementById('previewState');
@@ -793,6 +801,7 @@
                     currentUploadXhr.abort();
                     currentUploadXhr = null;
                 }
+                currentUploadToken = null;
                 fetch('/api/upload-cancel/' + uploadToken, {method: 'DELETE'}).catch(function() {});
                 resetUploadUI();
                 showToast('Upload cancelled', 'info');
@@ -820,6 +829,7 @@
 
                     xhr.onload = function() {
                         currentUploadXhr = null;
+                        currentUploadToken = null;
                         try {
                             if (xhr.status >= 200 && xhr.status < 300) {
                                 resolve(JSON.parse(xhr.responseText));
@@ -838,6 +848,7 @@
 
                     xhr.onerror = function() {
                         currentUploadXhr = null;
+                        currentUploadToken = null;
                         reject(new Error('Network error'));
                     };
 
@@ -847,6 +858,7 @@
 
                     xhr.ontimeout = function() {
                         currentUploadXhr = null;
+                        currentUploadToken = null;
                         reject(new Error('Upload timeout, please check network connection or file size'));
                     };
 

@@ -443,6 +443,7 @@
         }
         let uploadedFile = null;
         let currentUploadXhr = null;
+        let currentUploadToken = null;
         let jobs = [];
         let jobsTimerId = null;
         let filesTimerId = null;
@@ -741,6 +742,12 @@
             if (currentUploadXhr) {
                 currentUploadXhr.abort();
                 currentUploadXhr = null;
+                // 中止上传时同步通知服务端取消：如果服务端已收完数据，
+                // 只 abort 客户端请求会留下孤儿文件和 token
+                if (currentUploadToken) {
+                    fetch('/api/upload-cancel/' + currentUploadToken, { method: 'DELETE' }).catch(function() {});
+                    currentUploadToken = null;
+                }
             }
             previewGeneration++;
             stopPreviewCheck();
@@ -771,6 +778,7 @@
             const uploadToken = 'up_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
             formData.append('file', file);
             formData.append('upload_token', uploadToken);
+            currentUploadToken = uploadToken;
 
             const uploadState = document.getElementById('uploadState');
             const previewState = document.getElementById('previewState');
@@ -792,6 +800,7 @@
                     currentUploadXhr.abort();
                     currentUploadXhr = null;
                 }
+                currentUploadToken = null;
                 fetch('/api/upload-cancel/' + uploadToken, {method: 'DELETE'}).catch(function() {});
                 resetUploadUI();
                 showToast('上传已取消', 'info');
@@ -819,6 +828,7 @@
 
                     xhr.onload = function() {
                         currentUploadXhr = null;
+                        currentUploadToken = null;
                         try {
                             if (xhr.status >= 200 && xhr.status < 300) {
                                 resolve(JSON.parse(xhr.responseText));
@@ -837,6 +847,7 @@
 
                     xhr.onerror = function() {
                         currentUploadXhr = null;
+                        currentUploadToken = null;
                         reject(new Error('网络错误'));
                     };
 
@@ -846,6 +857,7 @@
 
                     xhr.ontimeout = function() {
                         currentUploadXhr = null;
+                        currentUploadToken = null;
                         reject(new Error('上传超时，请检查网络连接或文件大小后重试'));
                     };
 

@@ -2220,8 +2220,11 @@ def api_print():
 
     job_id, success = submit_print_job(filepath, printer_name, color_mode, duplex, orientation, paper_size, paper_type, copies, page_range, mirror, print_scaling)
 
+    # 无论成功还是失败都清理终态任务：失败的提交同样是终态记录，
+    # 只在成功路径清理会让长期失败的任务占满 JOB_MAX_COUNT 名额
+    _sweep_terminal_jobs()
+
     if success:
-        _sweep_terminal_jobs()   # 提交即清理：print_jobs 只在打印时增长，此处足以维持上限
         with print_jobs_lock:
             job_data = _sanitize_job(print_jobs[job_id])
         return jsonify({
