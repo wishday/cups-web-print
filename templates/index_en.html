@@ -952,7 +952,9 @@
                 let previewAvailable = false;
                 try {
                     const headResponse = await fetch(previewUrl, { method: 'HEAD' });
-                    previewAvailable = headResponse.ok;
+                    const previewType = (headResponse.headers.get('content-type') || '').toLowerCase();
+                    // Require an actual PDF response, not just a 2xx status
+                    previewAvailable = headResponse.ok && previewType.includes('application/pdf');
                 } catch (error) {
                     console.error('检查预览文件失败:', error);
                 }
@@ -966,6 +968,21 @@
                         openLink.href = previewUrl;
                         openLink.classList.remove('hidden');
                     }
+                }
+
+                // Browsers that explicitly cannot render PDFs inline (e.g. Android Chrome): use images
+                if (previewAvailable && navigator.pdfViewerEnabled === false) {
+                    if (currentPreviewImages.length > 0) {
+                        loadFallbackImages();
+                        return;
+                    }
+                    previewContent.innerHTML = `
+                        <div class="flex flex-col items-center justify-center h-full bg-gray-50 text-center px-4">
+                            <p class="mb-2 text-gray-700 font-medium">Inline preview is not supported in this browser</p>
+                            <p class="mb-4 text-sm text-gray-500">Use “Open in new tab” above to view the PDF</p>
+                        </div>
+                    `;
+                    return;
                 }
 
                 const fallbackButtons = currentPreviewImages.length > 0 ? `
@@ -1066,7 +1083,7 @@
                             loadFallbackImages();
                         }
                     }
-                }, 10000);
+                }, 5000);
             } else {
                 previewContent.innerHTML = `<div class="flex items-center justify-center h-full text-gray-500">Preview not supported for this file format</div>`;
             }
