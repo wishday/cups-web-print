@@ -1444,7 +1444,7 @@
                                     <span class="font-medium">Job #${escapeHtml(job.job_id)}</span>
                                     <span class="text-gray-500">${formatFileSize(parseInt(job.size))}</span>
                                 </div>
-                                <div class="text-gray-600 truncate">${escapeHtml(job.filename)}</div>
+                                <div class="text-gray-600 truncate" title="${escapeHtml(job.filename)}">${escapeHtml(job.submitted || job.filename)}</div>
                             </div>
                         `).join('')}
                     </div>
