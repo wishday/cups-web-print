@@ -5,7 +5,7 @@ on:
   push:
     branches: [ "main" ]
     # 推送版本标签时也触发（发版流程：git tag v1.84 && git push origin v1.84）
-    tags: [ 'v*.*.*' ]
+    tags: [ 'v*.*' ]
     
    # 自动触发：拉取请求到 main 分支
   # pull_request:
