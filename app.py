@@ -1488,6 +1488,8 @@ def get_printer_queue(printer_name):
                             'job_id': job_id,
                             'user': parts[1] if len(parts) > 1 else '',
                             'size': parts[2] if len(parts) > 2 else '',
+                            # lpstat 头行的剩余字段即提交日期时间，例如 "Mon 10 Nov 2025 03:15:00 PM"
+                            'submitted': ' '.join(parts[3:]) if len(parts) > 3 else '',
                             # 没有 File: 信息时回退到任务号，避免展示错误内容
                             'filename': f'#{job_id}'
                         }

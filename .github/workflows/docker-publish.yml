@@ -4,7 +4,7 @@ on:
   # 自动触发：推送 main 分支
   push:
     branches: [ "main" ]
-    # 推送版本标签时也触发（发版流程：git tag v1.84 && git push origin v1.84）
+    # 推送版本标签时也触发（发版流程：git tag v1.85 && git push origin v1.85）
     tags: [ 'v*.*' ]
     
    # 自动触发：拉取请求到 main 分支
@@ -41,7 +41,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6  
 
-      # 从根目录 version 文件读取版本号，供后续打标签使用（例如 v1.81）
+      # 从根目录 version 文件读取版本号，供后续打标签使用（例如 v1.85）
       - name: Read version from file
         run: echo "VERSION=$(cat version | tr -d '[:space:]')" >> "$GITHUB_ENV"
 
@@ -107,7 +107,7 @@ jobs:
           tags: |
             # 默认标签：latest（始终存在）
             type=raw,value=latest
-            # 来自根目录 version 文件的版本号标签，例如 v1.81
+            # 来自根目录 version 文件的版本号标签，例如 v1.85
             # 仅在该标签尚未存在时才生成，避免覆盖已有版本对应的镜像
             ${{ steps.vtag.outputs.tag_exists == 'false' && format('type=raw,value=v{0}', env.VERSION) || '' }}
             # Git 分支名

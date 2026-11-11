@@ -3,6 +3,9 @@ FROM ubuntu:22.04
 # 避免交互式安装提示
 ENV DEBIAN_FRONTEND=noninteractive
 
+# 默认时区，可在运行时通过 -e TZ=America/New_York 覆盖
+ENV TZ=Asia/Shanghai
+
 # 安装所有运行时依赖（包括 CUPS、LibreOffice、中文字体、Java 等）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     cups \
@@ -19,7 +22,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-wqy-microhei \
     # Java 运行时（LibreOffice 某些转换需要）
     openjdk-11-jre-headless \
+    # 时区数据（供 TZ 环境变量解析）
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
+
+# 将默认时区写入系统文件，供不读取 TZ 环境变量的程序使用
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 # 刷新字体缓存（让系统立即识别新字体）
 RUN fc-cache -fv
