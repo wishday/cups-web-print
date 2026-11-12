@@ -128,7 +128,6 @@
                             <div class="bg-gray-800 text-white px-4 py-3 flex flex-wrap items-center gap-x-3 gap-y-2 flex-shrink-0">
                                 <div class="flex items-center gap-3 flex-1 min-w-[12rem]">
                                     <span id="previewFileName" class="truncate break-all"></span>
-                                    <span id="previewFileSize" class="text-xs text-gray-400 flex-shrink-0"></span>
                                 </div>
                                 <div class="flex items-center gap-2 flex-shrink-0 ml-auto">
                                     <a id="openPreviewInNewTab" href="#" target="_blank" rel="noopener noreferrer"
@@ -874,7 +873,6 @@
                 if (data.success) {
                     uploadedFile = data;
                     document.getElementById('previewFileName').textContent = data.filename;
-                    document.getElementById('previewFileSize').textContent = formatFileSize(file.size);
 
                     const uploadProgress = document.getElementById('uploadProgress');
                     const previewState = document.getElementById('previewState');
@@ -2011,7 +2009,6 @@
                 if (file) {
                     uploadedFile = { filename: file.filename };
                     document.getElementById('previewFileName').textContent = file.filename;
-                    document.getElementById('previewFileSize').textContent = formatFileSize(file.size);
                     
                     const uploadState = document.getElementById('uploadState');
                     const previewState = document.getElementById('previewState');
