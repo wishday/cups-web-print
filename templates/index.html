@@ -128,7 +128,6 @@
                             <div class="bg-gray-800 text-white px-4 py-3 flex flex-wrap items-center gap-x-3 gap-y-2 flex-shrink-0">
                                 <div class="flex items-center gap-3 flex-1 min-w-[12rem]">
                                     <span id="previewFileName" class="truncate break-all"></span>
-                                    <span id="previewFileSize" class="text-xs text-gray-400 flex-shrink-0"></span>
                                 </div>
                                 <div class="flex items-center gap-2 flex-shrink-0 ml-auto">
                                     <a id="openPreviewInNewTab" href="#" target="_blank" rel="noopener noreferrer"
@@ -874,7 +873,6 @@
                 if (data.success) {
                     uploadedFile = data;
                     document.getElementById('previewFileName').textContent = data.filename;
-                    document.getElementById('previewFileSize').textContent = formatFileSize(file.size);
 
                     const uploadProgress = document.getElementById('uploadProgress');
                     const previewState = document.getElementById('previewState');
@@ -904,6 +902,9 @@
         let currentPreviewImages = [];
         let previewLoadTimeout = null;
         let previewGeneration = 0;
+        // 当前文件的预览地址与 PDF 可用状态（用于图片模式切回 PDF、同步头部链接）
+        let currentPreviewFile = '';
+        let previewPdfAvailable = false;
 
         // 停止预览超时兜底（PDF 加载成功 / 失败切图片 / 页面切换时调用）
         // 避免旧预览的异步回调作用到新文件上
@@ -923,7 +924,7 @@
             }
         }
 
-        async function loadPreview(filename, previewImages = null) {
+        async function loadPreview(filename, previewImages = null, manualPdf = false) {
             const previewContent = document.getElementById('previewContent');
             if (!previewContent) return;
 
@@ -931,6 +932,8 @@
             const generation = ++previewGeneration;
             stopPreviewCheck();
             clearOpenPreviewLink();
+            currentPreviewFile = filename;
+            previewPdfAvailable = false;
 
             const ext = filename.split('.').pop().toLowerCase();
 
@@ -962,6 +965,7 @@
                 if (generation !== previewGeneration) return;
 
                 if (previewAvailable) {
+                    previewPdfAvailable = true;
                     const openLink = document.getElementById('openPreviewInNewTab');
                     if (openLink) {
                         openLink.href = previewUrl;
@@ -1059,7 +1063,12 @@
                         if (generation !== previewGeneration) return;
                         if (!pdfLoaded) {
                             hideLoading();
-                            loadFallbackImages();
+                            if (manualPdf) {
+                                // 手动切回 PDF 时失败不再自动降级，避免按钮点击后又被切回图片
+                                showToast('PDF 预览无法显示，请用上方“在新标签页打开”查看，或切回图片预览', 'error');
+                            } else {
+                                loadFallbackImages();
+                            }
                         }
                     });
                 }
@@ -1077,7 +1086,7 @@
                     if (generation !== previewGeneration) return;
                     if (!pdfLoaded) {
                         hideLoading();
-                        if (currentPreviewImages.length > 0) {
+                        if (currentPreviewImages.length > 0 && !manualPdf) {
                             showToast('PDF 预览加载超时，已切换为图片预览', 'info');
                             loadFallbackImages();
                         }
@@ -1086,6 +1095,12 @@
             } else {
                 previewContent.innerHTML = `<div class="flex items-center justify-center h-full text-gray-500">暂不支持此文件格式预览</div>`;
             }
+        }
+
+        // 图片预览模式下切回 PDF（手动切换，失败时不再自动降级）
+        function showPdfPreview() {
+            if (!currentPreviewFile || !previewPdfAvailable) return;
+            loadPreview(currentPreviewFile, currentPreviewImages, true);
         }
 
         // 降级为图片预览（当 PDF 加载失败或用户手动跳过时）
@@ -1097,9 +1112,18 @@
             // 如果有预览图片，显示图片预览
             // 注意：currentPreviewImages 可能为空（上传时转换失败），此时显示提示信息
             if (currentPreviewImages && currentPreviewImages.length > 0) {
+                const firstImageUrl = `/api/preview/${encodeURIComponent(currentPreviewImages[0].filename)}`;
+                // 图片模式下头部链接改为打开当前图片，保持与新标签内容一致
+                const openLink = document.getElementById('openPreviewInNewTab');
+                if (openLink) {
+                    openLink.href = firstImageUrl;
+                    openLink.classList.remove('hidden');
+                }
 
-                let imagesHtml = '<div class="image-preview-container h-full bg-gray-50 relative">';
-                imagesHtml += '<div class="h-full overflow-y-auto pb-12">';
+                const canShowPdf = previewPdfAvailable && navigator.pdfViewerEnabled !== false;
+
+                let imagesHtml = '<div class="image-preview-container h-full bg-gray-50 relative flex flex-col">';
+                imagesHtml += '<div class="flex-1 min-h-0 overflow-y-auto pb-12">';
                 imagesHtml += '<div class="flex flex-col items-center gap-2 p-4 pb-4">';
 
                 currentPreviewImages.forEach((img) => {
@@ -1111,11 +1135,25 @@
                 imagesHtml += '</div>';
 
                 if (currentPreviewImages.length > 1) {
+                    // 有底部按钮栏时页码徽标上移，避免互相遮挡
                     imagesHtml += `
-                        <div class="absolute bottom-3 left-1/2 -translate-x-1/2 pointer-events-none z-10">
+                        <div class="absolute ${canShowPdf ? 'bottom-20' : 'bottom-3'} left-1/2 -translate-x-1/2 pointer-events-none z-10">
                             <span class="inline-block bg-black/70 text-white px-4 py-1.5 rounded-full text-sm whitespace-nowrap">
                                 共 ${currentPreviewImages.length} 页
                             </span>
+                        </div>
+                    `;
+                }
+
+                if (canShowPdf) {
+                    imagesHtml += `
+                        <div class="flex flex-wrap gap-3 justify-center p-3 border-t border-gray-200 bg-white shrink-0">
+                            <button onclick="showPdfPreview()" class="inline-flex items-center gap-2 bg-gray-500 hover:bg-gray-600 text-white px-4 py-2 rounded-lg transition">
+                                <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                                </svg>
+                                显示 PDF 预览
+                            </button>
                         </div>
                     `;
                 }
@@ -1971,7 +2009,6 @@
                 if (file) {
                     uploadedFile = { filename: file.filename };
                     document.getElementById('previewFileName').textContent = file.filename;
-                    document.getElementById('previewFileSize').textContent = '已上传文件';
                     
                     const uploadState = document.getElementById('uploadState');
                     const previewState = document.getElementById('previewState');
