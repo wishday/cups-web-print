@@ -180,6 +180,7 @@
                         <div>
                             <label class="block text-sm font-medium text-gray-700 mb-2">Paper Size</label>
                             <select id="paperSize" class="w-full border border-gray-300 rounded-lg px-4 py-2">
+                                <option value="auto">Printer Default / Auto</option>
                                 <option value="A4" selected>A4 (21.0×29.7cm)</option>
                                 <option value="A3">A3 (29.7×42.0cm)</option>
                                 <option value="A2">A2 (42.0×59.4cm)</option>
@@ -192,11 +193,16 @@
                                 <option value="4x6">4×6 inches (10.2×15.2cm)</option>
                                 <option value="5x7">5×7 inches (12.7×17.8cm)</option>
                                 <option value="8x10">8×10 inches (20.3×25.4cm)</option>
+                                <option value="Letter">Letter (8.5×11in)</option>
+                                <option value="Legal">Legal (8.5×14in)</option>
+                                <option value="Executive">Executive (7.25×10.5in)</option>
+                                <option value="Tabloid">Tabloid (11×17in)</option>
                             </select>
                         </div>
                         <div>
                             <label class="block text-sm font-medium text-gray-700 mb-2">Paper Type</label>
                             <select id="paperType" class="w-full border border-gray-300 rounded-lg px-4 py-2">
+                                <option value="auto">Auto Select</option>
                                 <option value="plain" selected>Plain Paper</option>
                                 <option value="photo">Photo Paper</option>
                                 <option value="glossy">Glossy Photo Paper</option>
@@ -204,7 +210,6 @@
                                 <option value="envelope">Envelope</option>
                                 <option value="cardstock">Cardstock</option>
                                 <option value="labels">Labels</option>
-                                <option value="auto">Auto Select</option>
                             </select>
                         </div>
                     </div>
@@ -235,14 +240,14 @@
                             <label class="block text-sm font-medium text-gray-700 mb-2">Duplex Printing</label>
                             <div class="space-y-2">
                                 <label class="flex items-center p-2 border rounded-lg hover:bg-gray-50 cursor-pointer transition">
-                                    <input type="radio" name="duplex" value="one-sided" class="mr-3">
+                                    <input type="radio" name="duplex" value="one-sided" checked class="mr-3">
                                     <svg class="w-5 h-5 mr-2 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
                                     </svg>
                                     <span>One-sided</span>
                                 </label>
                                 <label class="flex items-center p-2 border rounded-lg hover:bg-gray-50 cursor-pointer transition">
-                                    <input type="radio" name="duplex" value="two-sided-long-edge" checked class="mr-3">
+                                    <input type="radio" name="duplex" value="two-sided-long-edge" class="mr-3">
                                     <svg class="w-5 h-5 mr-2 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" xmlns="http://www.w3.org/2000/svg">
                                         <!-- 长方形A4纸轮廓 -->
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 3h16v18H4z"/>
@@ -329,7 +334,7 @@
                                pattern="^(\d+(-\d+)?)(\s+\d+(-\d+)?)*$"
                                class="w-full border border-gray-300 rounded-lg px-4 py-2 focus:border-green-500 focus:ring-1 focus:ring-green-500"
                                oninput="validatePageRange(this.value)">
-                        <p class="text-xs text-gray-500 mt-1">Supported format: 1-5 8 10-12 (space-separated, commas not supported)</p>
+                        <p class="text-xs text-gray-500 mt-1">Supported format: 1-5 8 10-12 (space-separated, commas not supported; page numbers start at 1, and the start cannot exceed the end)</p>
                     </div>
 
                     <button id="printBtn" disabled class="w-full bg-blue-500 hover:bg-blue-600 disabled:bg-gray-400 text-white font-semibold py-3 rounded-lg">
@@ -519,7 +524,20 @@
 
             // 验证格式：1, 1-5, 1-5 8, 1-5 8 10-12（空格分隔）
             const pattern = /^(\d+(-\d+)?)(\s+\d+(-\d+)?)*$/;
-            const isValid = pattern.test(value);
+            let isValid = pattern.test(value);
+            let errorText = 'Invalid format';
+
+            // Page numbers start at 1, and the start of a range cannot exceed its end
+            if (isValid) {
+                for (const token of value.split(/\s+/)) {
+                    const parts = token.split('-').map(Number);
+                    if (parts[0] < 1 || (parts.length > 1 && parts[1] < parts[0])) {
+                        isValid = false;
+                        errorText = 'Page numbers start at 1, and the start cannot exceed the end';
+                        break;
+                    }
+                }
+            }
 
             if (errorSpan) {
                 if (isValid) {
@@ -530,7 +548,7 @@
                         input.classList.add('border-green-500');
                     }
                 } else {
-                    errorSpan.textContent = 'Invalid format';
+                    errorSpan.textContent = errorText;
                     errorSpan.classList.remove('hidden');
                     if (input) {
                         input.classList.remove('border-gray-300', 'border-green-500');
@@ -1211,7 +1229,7 @@
             // 验证页面范围格式
             if (pageRange && pageRange.value.trim() !== '') {
                 if (!validatePageRange(pageRange.value.trim())) {
-                    showToast('Invalid page range format, please use spaces (e.g., 1-5 8 10-12)', 'error');
+                    showToast('Invalid page range: use spaces (e.g., 1-5 8 10-12); page numbers start at 1 and the start cannot exceed the end', 'error');
                     return;
                 }
             }
@@ -2333,6 +2351,7 @@
 
         function getPaperSizeText(size) {
             const texts = {
+                'auto': 'Printer Default / Auto',
                 'A4': 'A4 (210×297mm)',
                 'A3': 'A3 (297×420mm)',
                 'A2': 'A2 (420×594mm)',
@@ -2344,7 +2363,11 @@
                 '3.5x5': '3.5×5 inches (89×127mm)',
                 '4x6': '4×6 inches (102×152mm)',
                 '5x7': '5×7 inches (127×178mm)',
-                '8x10': '8×10 inches (203×254mm)'
+                '8x10': '8×10 inches (203×254mm)',
+                'Letter': 'Letter (216×279mm)',
+                'Legal': 'Legal (216×356mm)',
+                'Executive': 'Executive (184×267mm)',
+                'Tabloid': 'Tabloid (279×432mm)'
             };
             return texts[size] || size;
         }

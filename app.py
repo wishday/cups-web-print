@@ -590,6 +590,27 @@ def is_valid_pdf(pdf_path):
         return False
 
 
+def get_pdf_page_count(pdf_path):
+    """
+    使用 pdfinfo 获取 PDF 总页数
+
+    Args:
+        pdf_path: PDF 文件路径
+
+    Returns:
+        int: 页数；无法获取时返回 None（调用方跳过页数校验）
+    """
+    try:
+        result = subprocess.run(['pdfinfo', pdf_path], capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            match = re.search(r'^Pages:\s+(\d+)', result.stdout, re.MULTILINE)
+            if match:
+                return int(match.group(1))
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError) as e:
+        logger.warning(f"获取 PDF 页数失败：{e}")
+    return None
+
+
 def remove_partial_file(path):
     """
     删除转换失败/超时后残留的不完整文件
@@ -960,6 +981,16 @@ def extract_pdf_pages_to_tmp(input_pdf, page_range):
         unique_id = uuid.uuid4().hex[:8]
         output_pdf = os.path.join('/tmp', f"print_{base_name}_{unique_id}_pages_{page_range.replace('-', '_').replace(',', '_').replace(' ', '_')}.pdf")
 
+        # 提前校验页码上限，避免 pdftk 因越界页码报错导致整个打印任务失败
+        total_pages = get_pdf_page_count(input_pdf)
+        if total_pages:
+            requested_max = 0
+            for token in page_range.split():
+                for num in token.split('-'):
+                    requested_max = max(requested_max, int(num))
+            if requested_max > total_pages:
+                return None, f"页码超出范围：文件共 {total_pages} 页，无法打印第 {requested_max} 页"
+
         # 检查 pdftk 是否可用
         try:
             result = subprocess.run(['pdftk', '--version'], capture_output=True, text=True, timeout=5)
@@ -1058,7 +1089,7 @@ def submit_print_job(filepath, printer_name, color_mode='mono', duplex='one-side
         color_mode: color/mono
         duplex: one-sided/two-sided-long-edge/two-sided-short-edge
         orientation: portrait/landscape (打印方向)
-        paper_size: 纸张大小 (A4, A3, A5, 3.5x5, 4x6, 5x7, 8x10)
+        paper_size: 纸张大小 (auto, A4, A3, A2, A1, A5, A6, B4, B5, 3.5x5, 4x6, 5x7, 8x10, Letter, Legal, Executive, Tabloid)
         paper_type: 纸张材质 (plain, photo, glossy, matte, envelope, cardstock, labels, auto)
         copies: 打印份数
         page_range: 页面范围，格式如 "1-5 8 10-12"（空格分隔，不支持逗号）
@@ -1111,11 +1142,17 @@ def submit_print_job(filepath, printer_name, color_mode='mono', duplex='one-side
             '5x7': 'na_5x7_5x7in',               # 5×7 英寸照片 (127×178mm)
             '8x10': 'na_8x10_8x10in',              # 8×10 英寸照片 (203×254mm)
 
-        }
-        # 获取纸张大小，如果不在映射表中则使用 A4 作为默认值
-        cups_paper_size = paper_size_map.get(paper_size, 'iso_a4_210x297mm')
-        cmd.extend(['-o', f'media={cups_paper_size}'])
+            # 北美常用尺寸
+            'Letter': 'na_letter_8.5x11in',        # Letter (8.5×11 英寸)
+            'Legal': 'na_legal_8.5x14in',          # Legal (8.5×14 英寸)
+            'Executive': 'na_executive_7.25x10.5in',  # Executive (7.25×10.5 英寸)
+            'Tabloid': 'na_ledger_11x17in',        # 11×17 英寸 (Tabloid/Ledger)
 
+        }
+        # 纸张大小为 auto 时不传 media，交由打印机默认纸张处理，避免与打印机能力冲突
+        if paper_size != 'auto':
+            cups_paper_size = paper_size_map.get(paper_size, 'iso_a4_210x297mm')
+            cmd.extend(['-o', f'media={cups_paper_size}'])
 
         # 添加纸张材质设置
         # PWG 5101.1 标准介质类型映射（多品牌打印机兼容）
@@ -1125,16 +1162,16 @@ def submit_print_job(filepath, printer_name, color_mode='mono', duplex='one-side
             'paper': 'stationery',       # 普通纸别名
             'normal': 'stationery',      # 普通纸别名
             'photo': 'photographic',     # 照片纸
-            'glossy': 'photographic',    # 光面照片纸
-            'matte': 'photographic',     # 哑光照片纸
+            'glossy': 'photographic-glossy',  # 光面照片纸
+            'matte': 'photographic-matte',    # 哑光照片纸
             'envelope': 'envelope',      # 信封
-            'transparency': 'transparency',  # 透明胶片
             'labels': 'labels',          # 标签纸
             'cardstock': 'cardstock',    # 卡片纸
-            'auto': 'auto',              # 自动选择
         }
-        cups_paper_type = paper_type_map.get(paper_type.lower(), 'stationery')
-        cmd.extend(['-o', f'media-type={cups_paper_type}'])
+        # 自动选择时不传 media-type，交由打印机决定
+        if paper_type != 'auto':
+            cups_paper_type = paper_type_map.get(paper_type.lower(), 'stationery')
+            cmd.extend(['-o', f'media-type={cups_paper_type}'])
 
         # 添加色彩设置
         if color_mode == 'mono':
@@ -2081,7 +2118,17 @@ def validate_page_range(page_range):
     if ',' in page_range:
         return False
     pattern = r'^(\d+(-\d+)?)(\s+\d+(-\d+)?)*$'
-    return bool(re.match(pattern, page_range))
+    if not re.match(pattern, page_range):
+        return False
+    # 页码需从 1 开始，且起始页不能大于结束页（pdftk 不支持倒序范围）
+    for token in page_range.split():
+        if '-' in token:
+            start, end = token.split('-', 1)
+            if int(start) < 1 or int(end) < int(start):
+                return False
+        elif int(token) < 1:
+            return False
+    return True
 
 @app.route('/api/print', methods=['POST'])
 def api_print():
@@ -2180,7 +2227,7 @@ def api_print():
     
     # 注意：预览文件检查在 get_printable_file() 中进行，避免重复检查
     # 验证纸张大小
-    valid_paper_sizes = ['A4', 'A3', 'A2', 'A1', 'A5', 'A6', 'B4', 'B5', '3.5x5', '4x6', '5x7', '8x10']
+    valid_paper_sizes = ['auto', 'A4', 'A3', 'A2', 'A1', 'A5', 'A6', 'B4', 'B5', '3.5x5', '4x6', '5x7', '8x10', 'Letter', 'Legal', 'Executive', 'Tabloid']
     if paper_size not in valid_paper_sizes:
         return jsonify({'error': f'无效的纸张大小，支持的格式: {", ".join(valid_paper_sizes)}'}), 400
 
@@ -2217,7 +2264,7 @@ def api_print():
     # 验证页面范围格式（可选）
     if page_range and page_range.strip():
         if not validate_page_range(page_range.strip()):
-            return jsonify({'error': '页面范围格式无效，请使用空格分隔（如：1-5 8 10-12）'}), 400
+            return jsonify({'error': '页面范围格式无效：请使用空格分隔（如 1-5 8 10-12），页码从 1 开始，且起始页不能大于结束页'}), 400
         page_range = page_range.strip()
 
     job_id, success = submit_print_job(filepath, printer_name, color_mode, duplex, orientation, paper_size, paper_type, copies, page_range, mirror, print_scaling)
