@@ -24,17 +24,29 @@ MESSAGES = {
         'zh': 'CUPS 未返回可识别的任务 ID，请到打印机确认任务是否已提交',
         'en': 'CUPS did not return a recognizable job ID. Please check the printer to confirm whether the job was submitted.',
     },
-    'job.no_job_id_tracking': {
-        'zh': 'CUPS 未返回可识别的任务 ID，无法跟踪进度',
-        'en': 'CUPS did not return a recognizable job ID; progress cannot be tracked.',
-    },
     'job.submit_failed': {
         'zh': '打印任务提交失败：{detail}',
         'en': 'Failed to submit print job: {detail}',
     },
+    'job.submit_failed_no_detail': {
+        'zh': '打印任务提交失败（CUPS 未返回错误信息）',
+        'en': 'Failed to submit print job (CUPS returned no error details)',
+    },
+    'job.held': {
+        'zh': '任务已暂停，请在 CUPS 或打印机上恢复后继续',
+        'en': 'Job is on hold. Resume it in CUPS or on the printer.',
+    },
+    'job.stopped': {
+        'zh': '任务已停止，请检查打印机状态（缺纸、卡纸或驱动错误）',
+        'en': 'Job stopped. Check the printer (out of paper, paper jam, or driver error).',
+    },
     'job.error': {
         'zh': '打印任务处理异常：{detail}',
         'en': 'Print job error: {detail}',
+    },
+    'job.query_failed': {
+        'zh': '无法查询打印队列（CUPS 可能未运行或正在重启），已停止跟踪该任务',
+        'en': 'Failed to query the print queue (CUPS may be stopped or restarting); job tracking stopped.',
     },
     'job.timeout': {
         'zh': '监控超时（任务已执行{minutes}分钟）',
@@ -99,10 +111,6 @@ MESSAGES = {
     'job.cancel_requested': {
         'zh': '打印任务已取消，5 秒后从列表删除',
         'en': 'Print job cancelled; it will be removed from the list in 5 seconds',
-    },
-    'job.marked_cancelled': {
-        'zh': '任务已标记为取消，5 秒后从列表删除',
-        'en': 'Job marked as cancelled; it will be removed from the list in 5 seconds',
     },
 
     # ---------- PDF / 预览文件处理 ----------
@@ -345,6 +353,48 @@ MESSAGES = {
     'error.cancel_failed_default_detail': {
         'zh': '任务可能已完成或已被删除',
         'en': 'the job may have already completed or been deleted',
+    },
+    'error.cancel_exception': {
+        'zh': '取消任务异常：{detail}',
+        'en': 'Error while cancelling the job: {detail}',
+    },
+    'error.file_too_large': {
+        'zh': '文件过大，最大支持 {limit_mb}MB',
+        'en': 'File too large. The maximum size is {limit_mb} MB.',
+    },
+    'error.list_files_failed': {
+        'zh': '获取文件列表失败：{detail}',
+        'en': 'Failed to retrieve the file list: {detail}',
+    },
+    'error.delete_file_failed': {
+        'zh': '删除文件失败：{detail}',
+        'en': 'Failed to delete the file: {detail}',
+    },
+
+    # ---------- 状态标签（后端消息中引用） ----------
+    'status.submitted': {
+        'zh': '已提交',
+        'en': 'Submitted',
+    },
+    'status.queued': {
+        'zh': '排队中',
+        'en': 'Queued',
+    },
+    'status.processing': {
+        'zh': '打印中',
+        'en': 'Printing',
+    },
+    'status.sent': {
+        'zh': '已发送',
+        'en': 'Sent',
+    },
+    'status.held': {
+        'zh': '已暂停',
+        'en': 'On hold',
+    },
+    'status.stopped': {
+        'zh': '已停止',
+        'en': 'Stopped',
     },
 }
 

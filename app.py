@@ -192,7 +192,7 @@ print_jobs = {}
 print_jobs_lock = threading.Lock()  # 添加线程锁保护共享数据
 
 # 已终止任务状态集合：这些任务不再被 monitor 跟踪，可被自动清理
-JOB_TERMINAL_STATES = {'completed', 'failed', 'timeout', 'unknown', 'error', 'cancelled'}
+JOB_TERMINAL_STATES = {'completed', 'sent', 'failed', 'timeout', 'unknown', 'error', 'cancelled'}
 # 任务总数硬上限：超过时丢弃最旧的已终止任务，防止 print_jobs 无限增长
 JOB_MAX_COUNT = 200
 
@@ -212,15 +212,26 @@ def _sanitize_job(job, lang=None):
     return j
 
 
-def _api_error(key, status=400, **params):
-    """返回本地化错误文案 + 机器可读错误码。"""
+def _api_error(key, http_status=400, **params):
+    """返回本地化错误文案 + 机器可读错误码。
+
+    参数名用 http_status 而非 status：消息模板里可能有 {status} 占位符
+    （如 error.file_in_use），避免与关键字参数冲突。
+    """
     lang = get_request_lang()
-    return jsonify({'error': t(key, lang, **params), 'error_code': key}), status
+    return jsonify({'error': t(key, lang, **params), 'error_code': key}), http_status
 
 
 def _message_fields(code, **params):
     """生成任务消息字段：保存 code + params，响应时按查看者语言渲染。"""
     return {'message_code': code, 'message_params': params}
+
+
+@app.errorhandler(413)
+def handle_file_too_large(_error):
+    """超过 MAX_CONTENT_LENGTH 时返回本地化 JSON，避免前端拿到 Flask 默认 HTML。"""
+    limit_mb = app.config['MAX_CONTENT_LENGTH'] // (1024 * 1024)
+    return _api_error('error.file_too_large', 413, limit_mb=limit_mb)
 
 
 def _sweep_terminal_jobs():
@@ -1135,6 +1146,8 @@ def submit_print_job(filepath, printer_name, color_mode='mono', duplex='two-side
     """
     job_id = str(uuid.uuid4())
     filename = os.path.basename(filepath)
+    # 先初始化，保证异常记录里也能引用（get_printable_file 本身抛异常时不会未定义）
+    actual_print_file = None
     try:
         # 所有文件类型（文档、图片、PDF）均有对应的预览 PDF
         actual_print_file, conversion_error, _ = get_printable_file(filepath, filename, page_range)
@@ -1278,7 +1291,11 @@ def submit_print_job(filepath, printer_name, color_mode='mono', duplex='two-side
             job_message = msg('job.submitted') if cups_job_id else msg('job.no_job_id_submitted')
         else:
             job_status = 'failed'
-            job_message = msg('job.submit_failed', detail=result.stderr.strip() or t('error.unknown', 'en'))
+            stderr_text = result.stderr.strip()
+            job_message = (
+                msg('job.submit_failed', detail=stderr_text)
+                if stderr_text else msg('job.submit_failed_no_detail')
+            )
 
         with print_jobs_lock:
             print_jobs[job_id] = {
@@ -1325,6 +1342,8 @@ def submit_print_job(filepath, printer_name, color_mode='mono', duplex='two-side
                 'status': 'error',
                 'message_code': 'job.error',
                 'message_params': {'detail': str(e)},
+                # 记录实际打印文件，异常时也能在用户删除任务记录时清掉 /tmp 抽取页 PDF
+                'actual_print_file': actual_print_file,
                 'timestamp': datetime.now().isoformat(),
                 'progress': 0
             }
@@ -1411,21 +1430,51 @@ def get_job_final_state(printer_name, cups_job_id):
         return 'unknown', ''
 
 
+def _active_job_state(block_lines):
+    """从 lpstat -l 的任务属性块判断是否被 hold / stopped。
+
+    只看 Status:/Alerts: 行：属性块里还有 "File: xxx.pdf"，
+    若扫描整块文本，文件名含 stop/hold/pause（如 stop-sign.pdf）会被误判。
+    """
+    reasons = []
+    for line in block_lines[1:]:
+        s = line.strip()
+        if s.lower().startswith(('status:', 'alerts:', 'alert:')):
+            reasons.append(s.split(':', 1)[1].strip().lower())
+    attrs_text = '\n'.join(reasons)
+    if 'hold' in attrs_text or 'pause' in attrs_text:
+        return 'held'
+    if 'stop' in attrs_text:
+        return 'stopped'
+    return None
+
+
 def monitor_job_progress(job_id, cups_job_id, printer_name):
     """
     监控打印任务进度（根据队列位置）
 
     每秒检查任务是否在 CUPS 队列中：
-    - 不在队列：任务完成
+    - 不在队列：连续两次确认后读取 CUPS 历史属性判定终态
     - 在队列中且为最小 job ID：处于队首，开始处理计时
     - 在队列中但不是最小 job ID：排队等待
+    - hold / stopped：提示等待人工处理，不再假装打印中
     - 超过 10 分钟：继续监控，状态中显示已执行时长
     - 安全上限：2 小时（避免线程永久存活）
+
+    容错：查询失败按 1 秒间隔重试，仅用于覆盖网络丢包等短暂抖动；
+    连续 5 次失败说明 CUPS 本身不可用（如 cupsd 重启），标记 error 并退出监控。
+    单次查不到任务不算数，需连续两次确认后才会去读取终态。
     """
     start_time = time.time()
     processing_start_time = None
     max_monitor_time = 2 * 60 * 60
     long_job_notice_time = 10 * 60
+    max_query_failures = 5
+    missing_confirmations = 2
+    max_unknown_confirmations = 3
+    consecutive_query_failures = 0
+    missing_streak = 0
+    unknown_streak = 0
 
     while True:
         with print_jobs_lock:
@@ -1436,14 +1485,6 @@ def monitor_job_progress(job_id, cups_job_id, printer_name):
 
         if job_status == 'cancelled':
             logger.debug(f"任务 {job_id} 已取消，停止监控")
-            break
-
-        if cups_job_id is None:
-            logger.warning(f"任务 {job_id} 缺少 CUPS job ID，无法跟踪进度，放弃监控")
-            with print_jobs_lock:
-                if job_id in print_jobs and print_jobs[job_id].get('status') == 'submitted':
-                    print_jobs[job_id]['status'] = 'unknown'
-                    print_jobs[job_id].update(_message_fields('job.no_job_id_tracking'))
             break
 
         elapsed_time = time.time() - start_time
@@ -1459,26 +1500,74 @@ def monitor_job_progress(job_id, cups_job_id, printer_name):
             break
 
         try:
-            queue_result = _lpstat(['-o', printer_name])
+            # 用 -l 获取任务属性块，才能识别 hold / stopped，而不是只看“在不在队列”
+            queue_result = _lpstat(['-l', '-o', printer_name])
 
-            job_in_queue = (
-                queue_result.returncode == 0 and
-                any(line.strip().startswith(f"{printer_name}-{cups_job_id} ")
-                    for line in queue_result.stdout.split('\n'))
-            )
+            if queue_result.returncode != 0:
+                consecutive_query_failures += 1
+                logger.warning(
+                    f"查询任务 {job_id} 队列失败（第 {consecutive_query_failures} 次）："
+                    f"{queue_result.stderr.strip()}"
+                )
+                if consecutive_query_failures < max_query_failures:
+                    # 短暂抖动（如网络丢包）重试即可
+                    time.sleep(1)
+                    continue
+                # 连续失败说明 CUPS 本身不可用（如 cupsd 重启），不是任务终态。
+                # 标记 error 并退出监控，避免误判成 completed/unknown，也避免线程空转。
+                with print_jobs_lock:
+                    if job_id in print_jobs:
+                        print_jobs[job_id]['status'] = 'error'
+                        print_jobs[job_id].update(_message_fields('job.query_failed'))
+                logger.error(
+                    f"任务 {job_id} 连续 {max_query_failures} 次查询队列失败，停止监控"
+                )
+                break
+            consecutive_query_failures = 0
+
+            # 按 job 头行分组：头行形如 "Printer-123 user 1024 ..."，
+            # 后续缩进行是该任务的属性（Alerts 等）
+            blocks = {}
+            current_id = None
+            for line in queue_result.stdout.splitlines():
+                m = re.match(rf'{re.escape(printer_name)}-(\d+)\s', line)
+                if m:
+                    current_id = int(m.group(1))
+                    blocks[current_id] = [line]
+                elif current_id is not None:
+                    blocks[current_id].append(line)
+
+            current_cups_id = int(cups_job_id)
+            job_in_queue = queue_result.returncode == 0 and current_cups_id in blocks
 
             if job_in_queue:
-                # 解析队列中所有 CUPS job ID
-                all_ids = []
-                for line in queue_result.stdout.split('\n'):
-                    m = re.match(rf'{re.escape(printer_name)}-(\d+)\s', line.strip())
-                    if m:
-                        all_ids.append(int(m.group(1)))
+                missing_streak = 0
+                unknown_streak = 0
+                job_state = _active_job_state(blocks[current_cups_id])
 
-                current_cups_id = int(cups_job_id)
-                is_front = all_ids and current_cups_id == min(all_ids)
+                # 被 hold / stopped 的任务不参与“队首”判断，避免阻塞后续任务
+                printable_ids = [
+                    jid for jid in blocks
+                    if jid == current_cups_id or _active_job_state(blocks[jid]) is None
+                ]
+                is_front = printable_ids and current_cups_id == min(printable_ids)
 
-                if is_front:
+                if job_state == 'held':
+                    with print_jobs_lock:
+                        if job_id in print_jobs:
+                            print_jobs[job_id]['status'] = 'held'
+                            print_jobs[job_id].update(_message_fields('job.held'))
+                    # 只在状态切换时记录，避免每秒一条日志
+                    if job_status != 'held':
+                        logger.warning(f"任务 {job_id} 处于 hold 状态，等待人工恢复")
+                elif job_state == 'stopped':
+                    with print_jobs_lock:
+                        if job_id in print_jobs:
+                            print_jobs[job_id]['status'] = 'stopped'
+                            print_jobs[job_id].update(_message_fields('job.stopped'))
+                    if job_status != 'stopped':
+                        logger.warning(f"任务 {job_id} 处于 stopped 状态，等待人工处理")
+                elif is_front:
                     # 队首：开始或继续处理计时
                     if processing_start_time is None:
                         processing_start_time = time.time()
@@ -1496,7 +1585,7 @@ def monitor_job_progress(job_id, cups_job_id, printer_name):
                 else:
                     # 排队中：重置处理计时，显示前方任务数
                     processing_start_time = None
-                    sorted_ids = sorted(all_ids)
+                    sorted_ids = sorted(printable_ids)
                     position = sorted_ids.index(current_cups_id)
                     with print_jobs_lock:
                         if job_id in print_jobs:
@@ -1508,22 +1597,40 @@ def monitor_job_progress(job_id, cups_job_id, printer_name):
                                 print_jobs[job_id].update(_message_fields('job.queued', position=position))
                     logger.debug(f"任务 {job_id} 排队中，前方 {position} 个任务")
             else:
+                # 单次成功查询里看不到任务不算数，需连续两次确认，避免调度竞态
+                if queue_result.returncode == 0:
+                    missing_streak += 1
+                    if missing_streak < missing_confirmations:
+                        time.sleep(1)
+                        continue
+
                 # 任务不在活动队列：确认最终状态（可能完成、被取消或被中止）
                 final_state, final_reason = get_job_final_state(printer_name, cups_job_id)
+
+                # 终态暂时查不到可能是历史属性尚未落盘，连续确认仍未知才定论
+                if final_state == 'unknown' and queue_result.returncode == 0:
+                    unknown_streak += 1
+                    if unknown_streak < max_unknown_confirmations:
+                        time.sleep(1)
+                        continue
+
                 if final_state == 'completed':
                     if processing_start_time is None:
                         processing_start_time = start_time
                     total_time = int(time.time() - processing_start_time)
+                    completion_confirmed = False
                     with print_jobs_lock:
                         if job_id in print_jobs:
                             completion_confirmed = print_jobs[job_id].get('completion_confirmed', False)
-                            print_jobs[job_id]['status'] = 'completed'
+                            # 非 ipp:// 或 waitjob=off 时，只能确认“已发送”，不能确认出纸完成，
+                            # 因此用独立的 sent 状态，避免界面显示绿色的“已完成”。
+                            print_jobs[job_id]['status'] = 'completed' if completion_confirmed else 'sent'
                             print_jobs[job_id]['progress'] = 100
                             if completion_confirmed:
                                 print_jobs[job_id].update(_message_fields('job.completed', seconds=total_time))
                             else:
                                 print_jobs[job_id].update(_message_fields('job.sent_unconfirmed', seconds=total_time))
-                    logger.info(f"任务 {job_id} 已完成")
+                    logger.info(f"任务 {job_id} 已结束（{'完成' if completion_confirmed else '已发送，出纸未确认'}）")
                     cleanup_temp_file(job_id)
                 elif final_state == 'cancelled':
                     with print_jobs_lock:
@@ -2125,7 +2232,7 @@ def api_list_files():
         return jsonify({'success': True, 'files': files})
     except Exception as e:
         logger.error(f"获取文件列表失败: {e}")
-        return jsonify({'error': str(e)}), 500
+        return _api_error('error.list_files_failed', 500, detail=str(e))
 
 @app.route('/api/files/<path:filename>', methods=['DELETE'])
 def api_delete_file(filename):
@@ -2145,12 +2252,16 @@ def api_delete_file(filename):
         return _api_error('error.invalid_file_path', 403)
     
     # 检查是否有正在进行的打印任务
+    lang = get_request_lang()
     with print_jobs_lock:
         for job_id, job in print_jobs.items():
             if job['filename'] == filename:
-                if job['status'] in ['submitted', 'processing', 'queued']:
+                if job['status'] in ['submitted', 'processing', 'queued', 'held', 'stopped']:
                     logger.warning(f"文件 {filename} 正在打印中，无法删除 (任务状态：{job['status']})")
-                    return _api_error('error.file_in_use', 400, status=job['status'])
+                    return _api_error(
+                        'error.file_in_use', 400,
+                        status=t(f"status.{job['status']}", lang)
+                    )
     
     if os.path.exists(filepath):
         try:
@@ -2203,7 +2314,7 @@ def api_delete_file(filename):
             return jsonify({'success': True})
         except Exception as e:
             logger.error(f"删除文件失败: {e}")
-            return jsonify({'error': str(e)}), 500
+            return _api_error('error.delete_file_failed', 500, detail=str(e))
     
     return _api_error('error.file_not_found', 404)
 
@@ -2397,8 +2508,9 @@ def api_cancel_job(job_id):
             return _api_error('error.job_not_found', 404)
         job = print_jobs[job_id].copy()
 
-    # 已完成、失败、已取消、超时、状态未知或出错的任务，监控已经结束，直接删除记录
-    if job['status'] in ['completed', 'failed', 'cancelled', 'timeout', 'unknown', 'error']:
+    # 已完成、发送完成、失败、已取消、超时、状态未知或出错的任务，监控已经结束，
+    # 直接删除记录。unknown 也允许手动删除：监控已停止，记录本身不再更新。
+    if job['status'] in JOB_TERMINAL_STATES:
         # 先清理临时文件，再删除
         cleanup_temp_file(job_id)
         with print_jobs_lock:
@@ -2453,32 +2565,22 @@ def api_cancel_job(job_id):
             else:
                 # CUPS 取消失败：不要假装取消成功，否则页面显示已取消但打印机仍在出纸。
                 # 保持任务记录不变，交给监控线程继续跟踪真实状态。
-                logger.warning(f"CUPS 取消任务失败：{result.stderr}")
+                stderr_text = result.stderr.strip()
+                logger.warning(f"CUPS 取消任务失败：{stderr_text}")
                 return _api_error(
                     'error.cancel_failed', 409,
-                    detail=result.stderr.strip() or t('error.cancel_failed_default_detail', lang)
+                    detail=stderr_text or t('error.cancel_failed_default_detail', lang)
                 )
         except Exception as e:
             logger.error(f"取消任务异常：{e}")
-            return jsonify({
-                'success': False,
-                'error': str(e)
-            }), 500
+            return _api_error('error.cancel_exception', 500, detail=str(e))
     else:
-        # 如果没有 cups_job_id，直接标记为取消
-        with print_jobs_lock:
-            if job_id in print_jobs:
-                print_jobs[job_id]['status'] = 'cancelled'
-                print_jobs[job_id]['progress'] = current_progress
-                print_jobs[job_id].update(_message_fields('job.manual_cancelled'))
-        # 启动后台线程，5 秒后删除任务
-        remove_thread = threading.Thread(target=remove_job_after_delay, args=(job_id, 5))
-        remove_thread.daemon = True
-        remove_thread.start()
-        return jsonify({
-            'success': True,
-            'message': t('job.marked_cancelled', lang)
-        })
+        # 能走到这里的非终态任务都带 CUPS 任务 ID；缺失说明数据异常，
+        # 不能假装已取消（否则页面显示已取消但打印机可能仍在出纸）。
+        return _api_error(
+            'error.cancel_failed', 409,
+            detail=t('error.cancel_failed_default_detail', lang)
+        )
 
 @app.route('/api/jobs', methods=['GET'])
 def api_all_jobs():

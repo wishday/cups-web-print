@@ -2135,7 +2135,7 @@
                             </div>
                         </div>
                         
-                        ${job.progress !== undefined && job.progress > 0 ? `
+                        ${job.progress !== undefined && job.progress > 0 && job.status !== 'sent' ? `
                         <div class="mb-2">
                             <div class="flex justify-between items-center mb-1">
                                 <span class="text-xs text-gray-500">打印进度</span>
@@ -2212,9 +2212,13 @@
                 'queued': 'bg-purple-100 text-purple-800',
                 'processing': 'bg-yellow-100 text-yellow-800',
                 'completed': 'bg-green-100 text-green-800',
+                'sent': 'bg-teal-100 text-teal-800',
                 'failed': 'bg-red-100 text-red-800',
                 'timeout': 'bg-orange-100 text-orange-800',
                 'cancelled': 'bg-gray-100 text-gray-800',
+                'held': 'bg-amber-100 text-amber-800',
+                'stopped': 'bg-red-100 text-red-800',
+                'error': 'bg-red-100 text-red-800',
                 'unknown': 'bg-gray-200 text-gray-800'
             };
             return colors[status] || 'bg-gray-100 text-gray-800';
@@ -2233,9 +2237,12 @@
                 'queued': '排队中',
                 'processing': '处理中',
                 'completed': '已完成',
+                'sent': '已发送',
                 'failed': '失败',
                 'timeout': '⏱️ 超时',
                 'cancelled': '已取消',
+                'held': '已暂停',
+                'stopped': '已停止',
                 'error': '处理异常',
                 'unknown': '状态未知'
             };
@@ -2244,14 +2251,16 @@
 
         // 判断任务是否可以取消
         function canCancelJob(status) {
-            // 只有已提交和处理中的任务可以取消
-            return status === 'submitted' || status === 'queued' || status === 'processing';
+            // 排队、处理中，以及被 CUPS 暂停/停止的任务都可以取消
+            return status === 'submitted' || status === 'queued' || status === 'processing'
+                || status === 'held' || status === 'stopped';
         }
 
         // 判断任务是否可以删除
         function canDeleteJob(status) {
-            // 已完成、失败、超时和状态未知的任务可以删除
-            return status === 'completed' || status === 'failed' || status === 'timeout' || status === 'unknown' || status === 'error';
+            // 已完成、已发送、失败、超时和状态未知的任务可以删除
+            return status === 'completed' || status === 'sent' || status === 'failed'
+                || status === 'timeout' || status === 'unknown' || status === 'error';
         }
 
         // 取消任务
