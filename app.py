@@ -1313,6 +1313,9 @@ def get_job_final_state(printer_name, cups_job_id):
     通过 lpstat -l -W all 解析该任务的属性块，读取其中的 Alerts/Alert 字段判断：
     - 包含 cancel: 被取消（如 job-canceled-by-user / cups-remote-canceled）
     - 包含 abort 或 job-completed-with-errors: 被中止或出错
+    - 包含 cups-ipp-missing-get-job-attributes / missing-job-history /
+      missing-job-state / missing-job-id: IPP backend 实际无法等待打印机终态，
+      返回 unknown（即使同时出现 completed 关键字也不能确认出纸完成）
     - 明确包含 job-completed-successfully / job-completed-with-warnings /
       cups-remote-completed: 正常完成
     - 其余（none / 空 / 无法识别）: 不能默认为完成，返回 unknown 并保留原始原因
@@ -1361,6 +1364,17 @@ def get_job_final_state(printer_name, cups_job_id):
             return 'cancelled', alerts
         if 'abort' in alerts or 'job-completed-with-errors' in alerts:
             return 'failed', alerts
+        # IPP backend 实际上没能等待打印机终态（不支持 Get-Job-Attributes、
+        # 打印机关闭了作业历史/状态查询、或未返回 job-id）。
+        # 此时即使出现 completed，也只能说明本地后端已结束，不能确认出纸完成。
+        unconfirmed_reasons = (
+            'cups-ipp-missing-get-job-attributes',
+            'cups-ipp-missing-job-history',
+            'cups-ipp-missing-job-state',
+            'cups-ipp-missing-job-id',
+        )
+        if any(reason in alerts for reason in unconfirmed_reasons):
+            return 'unknown', alerts
         # 只有明确的完成证据才算完成；none/空/未知原因一律不下结论
         if ('job-completed-successfully' in alerts or
                 'job-completed-with-warnings' in alerts or
