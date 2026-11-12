@@ -342,18 +342,6 @@
                         🖨️ 提交打印
                     </button>
 
-                    <!-- 打印参数详情 -->
-                    <div id="printParamsSection" class="mt-4 hidden">
-                        <h3 class="text-lg font-semibold text-gray-800 mb-3 flex items-center">
-                            <svg class="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"/>
-                            </svg>
-                            打印参数详情
-                        </h3>
-                        <div id="printParamsContent" class="bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm">
-                            <!-- 参数内容将通过JavaScript动态填充 -->
-                        </div>
-                    </div>
                 </div>
 
             </div>
@@ -1271,10 +1259,6 @@
                     showToast('打印任务提交成功', 'success');
                     loadJobs();
                     resetForm();
-                    // 显示打印参数详情（必须在 resetForm 之后，否则会被隐藏）
-                    if (data.job) {
-                        showPrintParams(data.job);
-                    }
                 } else {
                     showToast('提交失败: ' + data.error, 'error');
                 }
@@ -1305,90 +1289,6 @@
             if (previewContent) previewContent.innerHTML = '';
 
             updatePrintButton();
-
-            // 隐藏打印参数详情
-            const printParamsSection = document.getElementById('printParamsSection');
-            if (printParamsSection) {
-                printParamsSection.classList.add('hidden');
-            }
-        }
-
-        function showPrintParams(job) {
-            const section = document.getElementById('printParamsSection');
-            const content = document.getElementById('printParamsContent');
-            
-            if (!section || !content) return;
-
-            section.classList.remove('hidden');
-            
-            const html = `
-                <div class="space-y-2">
-                    <div class="flex justify-between">
-                        <span class="text-gray-600">文件名:</span>
-                        <span class="font-medium text-gray-800">${escapeHtml(job.filename)}</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-gray-600">打印机:</span>
-                        <span class="text-gray-800">${escapeHtml(job.printer)}</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-gray-600">色彩模式:</span>
-                        <span class="text-gray-800">${escapeHtml(getColorModeText(job.color_mode))}</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-gray-600">双面打印:</span>
-                        <span class="text-gray-800">${escapeHtml(getDuplexText(job.duplex))}</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-gray-600">打印方向:</span>
-                        <span class="text-gray-800">${escapeHtml(getOrientationText(job.orientation))}</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-gray-600">纸张大小:</span>
-                        <span class="text-gray-800">${escapeHtml(getPaperSizeText(job.paper_size))}</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-gray-600">纸张材质:</span>
-                        <span class="text-gray-800">${escapeHtml(getPaperTypeText(job.paper_type))}</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-gray-600">打印份数:</span>
-                        <span class="text-gray-800">${job.copies}</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-gray-600">镜像打印:</span>
-                        <span class="text-gray-800">${job.mirror ? '是' : '否'}</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-gray-600">打印缩放:</span>
-                        <span class="text-gray-800">${escapeHtml(getPrintScalingText(job.print_scaling))}</span>
-                    </div>
-                    ${job.page_range ? `
-                    <div class="flex justify-between">
-                        <span class="text-gray-600">页面范围:</span>
-                        <span class="text-gray-800">${escapeHtml(job.page_range)}</span>
-                    </div>
-                    ` : ''}
-                    <div class="flex justify-between">
-                        <span class="text-gray-600">任务状态:</span>
-                        <span class="px-2 py-1 rounded-full text-xs ${getStatusColor(job.status)}">${escapeHtml(getStatusText(job.status))}</span>
-                    </div>
-                    ${job.cups_job_id ? `
-                    <div class="flex justify-between">
-                        <span class="text-gray-600">CUPS任务ID:</span>
-                        <span class="text-gray-800 font-mono text-xs">${escapeHtml(job.cups_job_id)}</span>
-                    </div>
-                    ` : ''}
-                    ${job.message ? `
-                    <div class="mt-2 pt-2 border-t border-blue-200">
-                        <span class="text-gray-600">消息:</span>
-                        <p class="text-gray-800 mt-1 text-sm">${escapeHtml(job.message)}</p>
-                    </div>
-                    ` : ''}
-                </div>
-            `;
-            
-            content.innerHTML = html;
         }
 
         async function loadPrinters() {
