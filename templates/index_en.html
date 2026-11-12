@@ -2012,7 +2012,7 @@
                 if (file) {
                     uploadedFile = { filename: file.filename };
                     document.getElementById('previewFileName').textContent = file.filename;
-                    document.getElementById('previewFileSize').textContent = 'Uploaded file';
+                    document.getElementById('previewFileSize').textContent = formatFileSize(file.size);
                     
                     const uploadState = document.getElementById('uploadState');
                     const previewState = document.getElementById('previewState');
