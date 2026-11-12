@@ -4,8 +4,8 @@ on:
   # 自动触发：推送 main 分支
   push:
     branches: [ "main" ]
-    # 推送版本标签时也触发（发版流程：git tag v1.84 && git push origin v1.84）
-    tags: [ 'v*.*.*' ]
+    # 推送版本标签时也触发（发版流程：git tag v1.85 && git push origin v1.85）
+    tags: [ 'v*.*' ]
     
    # 自动触发：拉取请求到 main 分支
   # pull_request:
@@ -41,7 +41,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6  
 
-      # 从根目录 version 文件读取版本号，供后续打标签使用（例如 v1.81）
+      # 从根目录 version 文件读取版本号，供后续打标签使用（例如 v1.85）
       - name: Read version from file
         run: echo "VERSION=$(cat version | tr -d '[:space:]')" >> "$GITHUB_ENV"
 
@@ -107,7 +107,7 @@ jobs:
           tags: |
             # 默认标签：latest（始终存在）
             type=raw,value=latest
-            # 来自根目录 version 文件的版本号标签，例如 v1.81
+            # 来自根目录 version 文件的版本号标签，例如 v1.85
             # 仅在该标签尚未存在时才生成，避免覆盖已有版本对应的镜像
             ${{ steps.vtag.outputs.tag_exists == 'false' && format('type=raw,value=v{0}', env.VERSION) || '' }}
             # Git 分支名
@@ -136,11 +136,23 @@ jobs:
       # （可选）将镜像设置为公开，方便任何人拉取
       # 补上 tag 发版场景：启用 tags 触发后，github.ref 变为 refs/tags/vX.Y.Z，
       # 原条件会导致发版构建跳过本步骤
+      #
+      # 注意：GitHub Packages 接口的包名不含 owner（不是 owner/repo），
+      # 组织仓库必须用 /orgs/{org}/packages/container/{name}，个人账号用 /user/...；
+      # 原实现路径和包名都拼错，且 curl 未加 -f，导致 404 也被当成成功。
+      # 可见性不影响镜像本身可用，失败时标记为警告但不阻塞发布。
       - name: Make image public (optional)
         if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref_type == 'tag'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          curl -X PATCH \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            https://api.github.com/user/packages/container/${{ env.IMAGE_NAME }}/visibility \
-            -d '{"visibility":"public"}'
+          PKG=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]')
+          OWNER="${{ github.repository_owner }}"
+          if gh api "/users/$OWNER" --jq .type | grep -qx Organization; then
+            API="/orgs/$OWNER/packages/container/$PKG"
+          else
+            API="/user/packages/container/$PKG"
+          fi
+          gh api --method PATCH "$API" -f visibility=public
+          echo "已设置 $PKG 为 public"

@@ -312,7 +312,9 @@ def _parse_trays(output):
     trays = []
     for i, tray_info in enumerate(printer_tray_info):
         # 兼容内联格式（name/type/status）与 collection 格式（tray-name/tray-type/tray-status）
-        name = tray_info.get('name') or tray_info.get('tray-name') or f'纸盒 {i+1}'
+        # 名称缺失时留空，由前端按界面语言兜底显示（纸盒 N / Tray N），
+        # 避免后端生成中文名称后出现在英文界面
+        name = tray_info.get('name') or tray_info.get('tray-name') or ''
         tray_type = tray_info.get('type') or tray_info.get('tray-type') or 'unknown'
         status = tray_info.get('status') or tray_info.get('tray-status') or 'unknown'
         status_cn = status_cn_map.get(status, '未知')

@@ -22,7 +22,7 @@
 ### 文件管理
 - 支持 PDF、DOC、DOCX、PPT、PPTX、XLS、XLSX、TXT、RTF 以及图片格式（JPG、JPEG、PNG、GIF、BMP、SVG）
 - 支持拖拽上传
-- 文件在线预览（电脑端PDF，移动端图片）
+- 文件在线预览（支持内嵌 PDF 时直接预览，移动端或加载失败时自动切换图片）
 - 文件列表查看和删除
 
 ### 打印设置
@@ -41,7 +41,8 @@
 - 实时任务状态监控（已提交/处理中/已完成/失败/已取消）
 - 任务进度显示（基于时间和cups队列估算）
 - 任务取消功能
-- 打印队列实时查看
+- 打印队列实时查看（显示任务提交时间）
+- 打印机断电/重启后自动恢复被停用的队列（需能探测到打印机在线）
 - 纸盒信息（IPP 协议）
 - 墨盒信息（IPP 协议）
 - 打印机信息（运行时间、固件版本、告警等）
@@ -64,7 +65,7 @@
 - **打印服务**: CUPS 2.0+
 - **文档转换**: LibreOffice 6.0+
 - **PDF 处理**: poppler-utils (pdftoppm), pdftk
-- **IPP 协议**: ipptool (cups-client)
+- **IPP 协议**: ipptool (`cups-ipp-utils`，由 `cups` 依赖链自动安装)
 
 ## 部署指导-容器安装(推荐)
 ### 1. 部署容器
@@ -87,6 +88,8 @@ docker run -d \
   -v cups-previews:/app/previews \
   ghcr.io/wishday/cups-web-print:latest
 ```
+
+> 时区默认 `Asia/Shanghai`，如服务器在其它时区，可加 `-e TZ=America/New_York` 覆盖。该设置会影响 CUPS、`lpstat` 以及打印队列中显示的提交时间。
 
 ### 2. 添加cups打印机
 #### 以网络打印机为例，其他打印机手动进入容器，参考cups官方文档操作
@@ -153,12 +156,13 @@ lpstat -p -v
 
 ### 4. 启动服务
 ```bash
-python3 app.py
+# 必须单 worker：任务/上传令牌/自动恢复状态都保存在进程内存中
+gunicorn --bind 0.0.0.0:5000 --workers 1 --threads 8 app:app
 
 #添加开机自启动后台运行(可选)
 crontab -e
 #添加以下一行(替换实际项目路径)
-@reboot nohup python3 /your-path-to/app.py > /dev/null 2>&1 &
+@reboot nohup gunicorn --chdir /your-path-to --bind 0.0.0.0:5000 --workers 1 --threads 8 app:app > /dev/null 2>&1 &
 
 ```
 
@@ -179,6 +183,9 @@ cups-web-print/
 ├── ipp_client.py             # 通过 IPP 获取纸盒、墨盒等状态信息
 ├── printer_checker.py        # 通过 IPP、BJNP 等协议确认打印机在线状态
 ├── requirements.txt          # Python 依赖
+├── Dockerfile                # 容器镜像构建文件
+├── entrypoint.sh             # 容器启动脚本（启动 CUPS 与 gunicorn）
+├── version                   # 当前版本号（用于镜像标签校验）
 ├── README.md                 # 项目文档
 ├── static/                   # 页面资源文件
 │   └── favicon.png
@@ -232,8 +239,8 @@ sudo netstat -tulpn | grep 5000
 # 防火墙放行端口（Ubuntu/Debian）
 sudo ufw allow 5000/tcp
 
-# 检查 Flask 绑定地址是否为 0.0.0.0（必须修改才能局域网访问）
-# 确保 app.py 中使用：app.run(host='0.0.0.0', port=5000)
+# 检查服务绑定地址是否为 0.0.0.0（必须修改才能局域网访问）
+# gunicorn 启动参数：--bind 0.0.0.0:5000；本地开发用：app.run(host='0.0.0.0', port=5000)
 ```
 
 ### 问题：打开页面列表无可用打印机
@@ -325,7 +332,7 @@ A web-based print service built with Python Flask and CUPS, supporting file uplo
 ### File Management
 - Supports PDF, DOC, DOCX, PPT, PPTX, XLS, XLSX, TXT, RTF, and image formats (JPG, JPEG, PNG, GIF, BMP, SVG)
 - Drag-and-drop upload support
-- Online file preview (PDF on desktop, images on mobile)
+- Online file preview (inline PDF where supported, automatic image fallback on mobile or load failure)
 - File list view and deletion
 
 ### Print Settings
@@ -344,7 +351,8 @@ A web-based print service built with Python Flask and CUPS, supporting file uplo
 - Real-time job status monitoring (Submitted / Processing / Completed / Failed / Cancelled)
 - Job progress display (estimated based on time and CUPS queue)
 - Job cancellation function
-- Real-time print queue view
+- Real-time print queue view (shows job submission time)
+- Automatic queue recovery after printer power loss/restart (requires online detection)
 - Paper tray information (IPP protocol)
 - Ink cartridge information (IPP protocol)
 - Printer information (uptime, firmware version, alerts, etc.)
@@ -367,7 +375,7 @@ A web-based print service built with Python Flask and CUPS, supporting file uplo
 - **Print Service**: CUPS 2.0+
 - **Document Conversion**: LibreOffice 6.0+
 - **PDF Processing**: poppler-utils (pdftoppm), pdftk
-- **IPP Protocol**: ipptool (cups-client)
+- **IPP Protocol**: ipptool (`cups-ipp-utils`, pulled in automatically by `cups`)
 
 ## Deployment Guide - Container Installation (Recommended)
 
@@ -392,6 +400,8 @@ docker run -d \
   -v cups-previews:/app/previews \
   ghcr.io/wishday/cups-web-print:latest
 ```
+
+> Timezone defaults to `Asia/Shanghai`. Override with `-e TZ=America/New_York` if needed; this affects CUPS, `lpstat`, and the submission time shown in the print queue.
 
 ### 2. Add a CUPS Printer
 
@@ -461,12 +471,13 @@ lpstat -p -v
 
 ### 4. Start Service
 ```bash
-python3 app.py
+# Must use a single worker: job/upload/recovery state lives in process memory
+gunicorn --bind 0.0.0.0:5000 --workers 1 --threads 8 app:app
 
 # Add auto-start on boot (optional)
 crontab -e
 # Add the following line (replace with actual project path)
-@reboot nohup python3 /your-path-to/app.py > /dev/null 2>&1 &
+@reboot nohup gunicorn --chdir /your-path-to --bind 0.0.0.0:5000 --workers 1 --threads 8 app:app > /dev/null 2>&1 &
 ```
 
 The service will start on `http://localhost:5000/en`
@@ -486,6 +497,9 @@ cups-web-print/
 ├── ipp_client.py             # Get paper tray, ink cartridge status via IPP
 ├── printer_checker.py        # Check printer online status via IPP, BJNP protocols
 ├── requirements.txt          # Python dependencies
+├── Dockerfile                # Container image build file
+├── entrypoint.sh             # Container entrypoint (starts CUPS and gunicorn)
+├── version                   # Current version (used for image tag validation)
 ├── README.md                 # Project documentation
 ├── static/                   # Page assets
 │   └── favicon.png
@@ -538,8 +552,8 @@ sudo netstat -tulpn | grep 5000
 # Allow port through firewall (Ubuntu/Debian)
 sudo ufw allow 5000/tcp
 
-# Check Flask binding address (must be 0.0.0.0 for LAN access)
-# Ensure app.py uses: app.run(host='0.0.0.0', port=5000)
+# Check the service bind address (must be 0.0.0.0 for LAN access)
+# gunicorn: --bind 0.0.0.0:5000; local development: app.run(host='0.0.0.0', port=5000)
 ```
 
 ### Issue: No available printers in page list

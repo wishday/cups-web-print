@@ -19,6 +19,8 @@ import re
 import shutil
 import glob
 
+from i18n import t, msg, get_request_lang
+
 # 应用版本号：从根目录 version 文件读取（纯数字，如 1.8），显示时加 v 前缀
 def _read_version():
     version_file = os.path.join(os.path.dirname(__file__), 'version')
@@ -190,16 +192,46 @@ print_jobs = {}
 print_jobs_lock = threading.Lock()  # 添加线程锁保护共享数据
 
 # 已终止任务状态集合：这些任务不再被 monitor 跟踪，可被自动清理
-JOB_TERMINAL_STATES = {'completed', 'failed', 'timeout', 'unknown', 'error', 'cancelled'}
+JOB_TERMINAL_STATES = {'completed', 'sent', 'failed', 'timeout', 'unknown', 'error', 'cancelled'}
 # 任务总数硬上限：超过时丢弃最旧的已终止任务，防止 print_jobs 无限增长
 JOB_MAX_COUNT = 200
 
 
-def _sanitize_job(job):
-    """返回不含内部绝对路径的 job 副本，避免向客户端泄露 actual_print_file"""
+def _sanitize_job(job, lang=None):
+    """返回不含内部绝对路径的 job 副本，并按查看者语言渲染任务消息。
+
+    任务记录保存 message_code + message_params，而不是已渲染的字符串，
+    这样同一个任务在中文页/英文页查看时都能显示对应语言。
+    """
     j = dict(job)
     j.pop('actual_print_file', None)
+    code = j.get('message_code')
+    params = j.pop('message_params', None) or {}
+    if code:
+        j['message'] = t(code, lang, **params)
     return j
+
+
+def _api_error(key, http_status=400, **params):
+    """返回本地化错误文案 + 机器可读错误码。
+
+    参数名用 http_status 而非 status：消息模板里可能有 {status} 占位符
+    （如 error.file_in_use），避免与关键字参数冲突。
+    """
+    lang = get_request_lang()
+    return jsonify({'error': t(key, lang, **params), 'error_code': key}), http_status
+
+
+def _message_fields(code, **params):
+    """生成任务消息字段：保存 code + params，响应时按查看者语言渲染。"""
+    return {'message_code': code, 'message_params': params}
+
+
+@app.errorhandler(413)
+def handle_file_too_large(_error):
+    """超过 MAX_CONTENT_LENGTH 时返回本地化 JSON，避免前端拿到 Flask 默认 HTML。"""
+    limit_mb = app.config['MAX_CONTENT_LENGTH'] // (1024 * 1024)
+    return _api_error('error.file_too_large', 413, limit_mb=limit_mb)
 
 
 def _sweep_terminal_jobs():
@@ -273,6 +305,77 @@ def _lpstat(args, timeout=5):
     )
 
 
+def _parse_printer_state(lpstat_output):
+    """
+    将 lpstat -p 输出统一解析为 idle / printing / disabled / unknown。
+
+    CUPS 的实际输出为：
+    - "printer X is idle.  enabled since ..."
+    - "printer X now printing X-123.  enabled since ..."
+    - "printer X disabled since ... -"
+    """
+    text = (lpstat_output or '').lower()
+    if 'disabled' in text:
+        return 'disabled'
+    if 'now printing' in text:
+        return 'printing'
+    if 'is idle' in text:
+        return 'idle'
+    return 'unknown'
+
+
+# 自动恢复 CUPS 队列：记录每台打印机上次尝试恢复的时间，避免前端轮询时反复执行
+_printer_recover_lock = threading.Lock()
+_printer_last_recover_attempt = {}
+PRINTER_RECOVER_COOLDOWN = 60  # 同一台打印机两次自动恢复的最小间隔（秒）
+
+
+def enable_printer_queue(printer_name):
+    """
+    重新启用被 CUPS 停用的打印队列。
+
+    打印过程中打印机断电/断网时，CUPS 后端会报错并按错误策略停用队列
+    （printers.conf 中记录 State Stopped），重启 cupsd 会重新加载该状态，
+    因此重启服务并不能恢复。cupsenable 发送 Resume-Printer 清除停用状态，
+    cupsaccept 确保队列继续接受任务。
+    """
+    errors = []
+    for command in ('cupsenable', 'cupsaccept'):
+        try:
+            result = subprocess.run(
+                [command, printer_name],
+                capture_output=True, text=True, timeout=10,
+                env={**os.environ, 'LC_ALL': 'C'}
+            )
+            if result.returncode != 0:
+                errors.append(f"{command}: {(result.stderr or result.stdout).strip()}")
+        except Exception as e:
+            errors.append(f"{command}: {e}")
+
+    if errors:
+        logger.warning(f"重新启用打印机 {printer_name} 失败：{'; '.join(errors)}")
+        return False
+
+    logger.info(f"已重新启用打印机 {printer_name} 的 CUPS 队列")
+    return True
+
+
+def try_recover_disabled_printer(printer_name):
+    """打印机在线但队列被停用时自动恢复（带冷却时间）"""
+    now = time.time()
+    with _printer_recover_lock:
+        if now - _printer_last_recover_attempt.get(printer_name, 0) < PRINTER_RECOVER_COOLDOWN:
+            return False
+        _printer_last_recover_attempt[printer_name] = now
+    return enable_printer_queue(printer_name)
+
+
+def _recover_cooldown_active(printer_name):
+    """冷却期内直接跳过，避免每次都先做昂贵的在线探测"""
+    with _printer_recover_lock:
+        return time.time() - _printer_last_recover_attempt.get(printer_name, 0) < PRINTER_RECOVER_COOLDOWN
+
+
 def is_safe_path(base_path, target_path):
     """
     检查目标路径是否在基础路径内，防止路径遍历攻击
@@ -326,6 +429,21 @@ def get_printer_uri(printer_name):
         return None
 
 
+def is_ipp_waitjob_enabled(printer_name):
+    """
+    判断该队列是否具备“打印机出纸完成后再结束任务”的前提。
+
+    CUPS 的 IPP backend 默认 waitjob=1，会轮询打印机的 Get-Job-Attributes，
+    直到打印机报告终态才退出；此时本地任务才离开活动队列。
+    非 ipp:// 队列（usb/socket/lpd）或 URI 带 waitjob=off 时，数据发完即算完成，
+    无法据此确认纸张已经打完。
+    """
+    uri = get_printer_uri(printer_name)
+    if not uri:
+        return False
+    if not re.match(r'^ipps?://', uri, re.IGNORECASE):
+        return False
+    return re.search(r'[?&+]waitjob=(?:off|no|false|0)(?:[&+]|$)', uri, re.IGNORECASE) is None
 
 
 def get_single_printer_status(printer_name, timeout=5):
@@ -353,17 +471,11 @@ def get_single_printer_status(printer_name, timeout=5):
             return None
         
         # 2. 获取 CUPS 队列状态
-        status = 'idle'
+        status = 'unknown'
         try:
             result = _lpstat(['-p', printer_name])
             if result.returncode == 0:
-                line = result.stdout.strip()
-                if 'is ready' in line.lower():
-                    status = 'ready'
-                elif 'is processing' in line.lower():
-                    status = 'processing'
-                elif 'is stopped' in line.lower():
-                    status = 'stopped'
+                status = _parse_printer_state(result.stdout)
         except Exception as e:
             logger.warning(f"获取打印机 {printer_name} 队列状态失败：{e}")
         
@@ -376,9 +488,6 @@ def get_single_printer_status(printer_name, timeout=5):
                     online_status = 'online'
                 else:
                     online_status = 'offline'
-                    # 如果探测离线，更新状态显示
-                    if status == 'idle':
-                        status = 'offline'
                 logger.debug(f"打印机 {printer_name} 在线检测：{probe_result}")
             except Exception as e:
                 logger.warning(f"打印机 {printer_name} 在线检测失败：{e}")
@@ -452,22 +561,29 @@ def safe_filename(filename, allowed_extensions):
         return None
 
     # 4. 清理文件名中的非法字符（保留中文、英文、数字、下划线、连字符、空格、括号等）
-    # 移除路径分隔符和控制字符
-    illegal_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|', '[', ']', ';', '\x00']
+    # 移除路径分隔符；控制字符（含换行/制表符）统一过滤，避免污染日志和 CUPS 标题
+    illegal_chars = ['/', '\\', ':', '*', '?', '"', '<', '>', '|', '[', ']', ';']
     safe_name = name_part
     for char in illegal_chars:
         safe_name = safe_name.replace(char, '')
+    safe_name = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', safe_name)
 
     # 移除 '..' 防止路径遍历
     safe_name = safe_name.replace('..', '')
+    # 去掉首尾的点和空格，避免隐藏文件及 Windows 共享上的异常文件名
+    safe_name = safe_name.strip(' .')
 
     # 5. 如果文件名为空，直接拒绝
-    if not safe_name.strip():
+    if not safe_name:
         return None
 
-    # 6. 限制文件名长度（避免文件系统限制）
-    if len(safe_name) > 200:
-        safe_name = safe_name[:200]
+    # 6. 按 UTF-8 字节数限制长度（200 字节为时间戳和扩展名预留空间，
+    #    避免 200 个中文字符超过 255 字节触发 ENAMETOOLONG）
+    max_bytes = 200
+    if len(safe_name.encode('utf-8')) > max_bytes:
+        safe_name = safe_name.encode('utf-8')[:max_bytes].decode('utf-8', 'ignore').rstrip(' .')
+        if not safe_name:
+            return None
 
     return f"{safe_name}{ext}"
 
@@ -519,6 +635,27 @@ def is_valid_pdf(pdf_path):
             return b'%%EOF' in f.read(tail_len)
     except OSError:
         return False
+
+
+def get_pdf_page_count(pdf_path):
+    """
+    使用 pdfinfo 获取 PDF 总页数
+
+    Args:
+        pdf_path: PDF 文件路径
+
+    Returns:
+        int: 页数；无法获取时返回 None（调用方跳过页数校验）
+    """
+    try:
+        result = subprocess.run(['pdfinfo', pdf_path], capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            match = re.search(r'^Pages:\s+(\d+)', result.stdout, re.MULTILINE)
+            if match:
+                return int(match.group(1))
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError) as e:
+        logger.warning(f"获取 PDF 页数失败：{e}")
+    return None
 
 
 def remove_partial_file(path):
@@ -833,7 +970,7 @@ def get_preview_file(original_filename):
 
 
 def get_printers_fast():
-    """获取可用的 CUPS 打印机列表（快速版本，不进行在线探测）"""
+    """获取可用的 CUPS 打印机列表（不做 IPP 在线探测）"""
     try:
         result = _lpstat(['-p'])
         printers = []
@@ -847,13 +984,7 @@ def get_printers_fast():
                     if len(parts) >= 2 and parts[0].lower() == 'printer':
                         printer_name = parts[1]
                         # 提取状态
-                        status = 'idle'
-                        if 'is ready' in line.lower():
-                            status = 'ready'
-                        elif 'is processing' in line.lower():
-                            status = 'processing'
-                        elif 'is stopped' in line.lower():
-                            status = 'stopped'
+                        status = _parse_printer_state(line)
 
                         # 获取打印机 URI
                         printer_uri = get_printer_uri(printer_name)
@@ -897,15 +1028,25 @@ def extract_pdf_pages_to_tmp(input_pdf, page_range):
         unique_id = uuid.uuid4().hex[:8]
         output_pdf = os.path.join('/tmp', f"print_{base_name}_{unique_id}_pages_{page_range.replace('-', '_').replace(',', '_').replace(' ', '_')}.pdf")
 
+        # 提前校验页码上限，避免 pdftk 因越界页码报错导致整个打印任务失败
+        total_pages = get_pdf_page_count(input_pdf)
+        if total_pages:
+            requested_max = 0
+            for token in page_range.split():
+                for num in token.split('-'):
+                    requested_max = max(requested_max, int(num))
+            if requested_max > total_pages:
+                return None, msg('error.page_out_of_range', total=total_pages, requested=requested_max)
+
         # 检查 pdftk 是否可用
         try:
             result = subprocess.run(['pdftk', '--version'], capture_output=True, text=True, timeout=5)
             logger.info(f"pdftk 版本：{result.stdout.strip()[:100] if result.stdout else 'available'}")
         except FileNotFoundError:
             logger.error("pdftk 未安装")
-            return None, "pdftk 未安装，无法提取页面"
+            return None, msg('error.pdftk_missing')
         except subprocess.TimeoutExpired:
-            return None, "pdftk 响应超时"
+            return None, msg('error.pdftk_timeout')
 
         # 使用 pdftk 提取页面到/tmp
         # pdftk 需要空格分隔的参数，如：pdftk input.pdf cat 2 4 output out.pdf
@@ -921,21 +1062,22 @@ def extract_pdf_pages_to_tmp(input_pdf, page_range):
             logger.info(f"PDF 页面提取成功：{output_pdf}")
             return output_pdf, None
 
-        error_msg = result.stderr.strip() if result.stderr else "未知错误"
+        # stderr 受 LC_ALL=C 影响是英文，兜底也用英文，避免英文界面出现中文细节
+        error_msg = result.stderr.strip() or 'unknown error'
         logger.error(f"PDF 页面提取失败：{error_msg}")
         # 清掉可能残留的半截文件，避免它一直占着 /tmp
         remove_partial_file(output_pdf)
-        return None, f"PDF 页面提取失败：{error_msg}"
+        return None, msg('error.pdf_extract_failed', detail=error_msg)
 
     except subprocess.TimeoutExpired:
         logger.error("PDF 页面提取超时")
         # 超时被 kill 时 pdftk 可能已写出部分页面
         remove_partial_file(output_pdf)
-        return None, "PDF 页面提取超时"
+        return None, msg('error.pdf_extract_timeout')
     except Exception as e:
         logger.error(f"PDF 页面提取异常：{e}")
         remove_partial_file(output_pdf)
-        return None, f"PDF 页面提取异常：{str(e)}"
+        return None, msg('error.pdf_extract_exception', detail=str(e))
 
 
 def get_printable_file(filepath, filename, page_range=None):
@@ -963,17 +1105,17 @@ def get_printable_file(filepath, filename, page_range=None):
 
     if not pdf_path:
         logger.error(f"预览文件路径不安全：{pdf_filename}")
-        return None, f"预览文件路径错误：{pdf_filename}", False
+        return None, msg('error.preview_path_invalid', filename=pdf_filename), False
     if not os.path.exists(pdf_path):
         logger.error(f"预览 PDF 不存在：{pdf_filename}，请重新上传")
-        return None, f"预览文件不存在：{pdf_filename}，请重新上传", False
+        return None, msg('error.preview_missing', filename=pdf_filename), False
 
     # 纵深防御：转换进程被 kill 或写入中断时，previews/ 里可能残留只写了一半的
     # PDF。仅凭 exists 无法识别，直接送去 lp 会打出损坏文档。这里再校验一次结构
     # 完整性，不合格就要求重新上传（api_upload 会据此覆盖掉损坏的预览文件）。
     if not is_valid_pdf(pdf_path):
         logger.error(f"预览 PDF 不完整（可能转换被中断）：{pdf_filename}，请重新上传")
-        return None, f"预览文件不完整：{pdf_filename}，请重新上传", False
+        return None, msg('error.preview_incomplete', filename=pdf_filename), False
 
     logger.info(f"使用预览 PDF: {pdf_path}")
     if page_range and page_range.strip():
@@ -985,7 +1127,7 @@ def get_printable_file(filepath, filename, page_range=None):
     return pdf_path, None, False
 
 
-def submit_print_job(filepath, printer_name, color_mode='mono', duplex='one-sided', orientation='portrait', paper_size='A4', paper_type='plain', copies=1, page_range=None, mirror=False, print_scaling='auto-fit'):
+def submit_print_job(filepath, printer_name, color_mode='mono', duplex='two-sided-long-edge', orientation='portrait', paper_size='A4', paper_type='plain', copies=1, page_range=None, mirror=False, print_scaling='auto-fit'):
     """
     提交打印任务到CUPS
 
@@ -995,8 +1137,8 @@ def submit_print_job(filepath, printer_name, color_mode='mono', duplex='one-side
         color_mode: color/mono
         duplex: one-sided/two-sided-long-edge/two-sided-short-edge
         orientation: portrait/landscape (打印方向)
-        paper_size: 纸张大小 (A4, A3, A5, 3.5x5, 4x6, 5x7, 8x10)
-        paper_type: 纸张材质 (plain, photo, glossy, matte, envelope, cardstock, labels, auto)
+        paper_size: 纸张大小 (auto, A4, A3, A2, A1, A5, A6, B4, B5, 3.5x5, 4x6, 5x7, 8x10, Letter, Legal, Executive, Tabloid)
+        paper_type: 纸张材质 (plain, photo, glossy, matte, transparency, envelope, cardstock, labels, auto)
         copies: 打印份数
         page_range: 页面范围，格式如 "1-5 8 10-12"（空格分隔，不支持逗号）
         mirror: 是否镜像打印
@@ -1004,19 +1146,22 @@ def submit_print_job(filepath, printer_name, color_mode='mono', duplex='one-side
     """
     job_id = str(uuid.uuid4())
     filename = os.path.basename(filepath)
+    # 先初始化，保证异常记录里也能引用（get_printable_file 本身抛异常时不会未定义）
+    actual_print_file = None
     try:
         # 所有文件类型（文档、图片、PDF）均有对应的预览 PDF
         actual_print_file, conversion_error, _ = get_printable_file(filepath, filename, page_range)
         
         if conversion_error:
-            logger.error(f"文件转换失败：{conversion_error}")
+            logger.error(f"文件转换失败：{conversion_error.code} {conversion_error.params}")
             with print_jobs_lock:
                 print_jobs[job_id] = {
                     'id': job_id,
                     'filename': filename,
                     'printer': printer_name,
                     'status': 'failed',
-                    'message': conversion_error,
+                    'message_code': conversion_error.code,
+                    'message_params': conversion_error.params,
                     'timestamp': datetime.now().isoformat(),
                     'progress': 0
                 }
@@ -1048,11 +1193,17 @@ def submit_print_job(filepath, printer_name, color_mode='mono', duplex='one-side
             '5x7': 'na_5x7_5x7in',               # 5×7 英寸照片 (127×178mm)
             '8x10': 'na_8x10_8x10in',              # 8×10 英寸照片 (203×254mm)
 
-        }
-        # 获取纸张大小，如果不在映射表中则使用 A4 作为默认值
-        cups_paper_size = paper_size_map.get(paper_size, 'iso_a4_210x297mm')
-        cmd.extend(['-o', f'media={cups_paper_size}'])
+            # 北美常用尺寸
+            'Letter': 'na_letter_8.5x11in',        # Letter (8.5×11 英寸)
+            'Legal': 'na_legal_8.5x14in',          # Legal (8.5×14 英寸)
+            'Executive': 'na_executive_7.25x10.5in',  # Executive (7.25×10.5 英寸)
+            'Tabloid': 'na_ledger_11x17in',        # 11×17 英寸 (Tabloid/Ledger)
 
+        }
+        # 纸张大小为 auto 时不传 media，交由打印机默认纸张处理，避免与打印机能力冲突
+        if paper_size != 'auto':
+            cups_paper_size = paper_size_map.get(paper_size, 'iso_a4_210x297mm')
+            cmd.extend(['-o', f'media={cups_paper_size}'])
 
         # 添加纸张材质设置
         # PWG 5101.1 标准介质类型映射（多品牌打印机兼容）
@@ -1062,16 +1213,17 @@ def submit_print_job(filepath, printer_name, color_mode='mono', duplex='one-side
             'paper': 'stationery',       # 普通纸别名
             'normal': 'stationery',      # 普通纸别名
             'photo': 'photographic',     # 照片纸
-            'glossy': 'photographic',    # 光面照片纸
-            'matte': 'photographic',     # 哑光照片纸
+            'glossy': 'photographic-glossy',  # 光面照片纸
+            'matte': 'photographic-matte',    # 哑光照片纸
+            'transparency': 'transparency',   # 透明胶片（幻灯片）
             'envelope': 'envelope',      # 信封
-            'transparency': 'transparency',  # 透明胶片
             'labels': 'labels',          # 标签纸
             'cardstock': 'cardstock',    # 卡片纸
-            'auto': 'auto',              # 自动选择
         }
-        cups_paper_type = paper_type_map.get(paper_type.lower(), 'stationery')
-        cmd.extend(['-o', f'media-type={cups_paper_type}'])
+        # 自动选择时不传 media-type，交由打印机决定
+        if paper_type != 'auto':
+            cups_paper_type = paper_type_map.get(paper_type.lower(), 'stationery')
+            cmd.extend(['-o', f'media-type={cups_paper_type}'])
 
         # 添加色彩设置
         if color_mode == 'mono':
@@ -1111,33 +1263,40 @@ def submit_print_job(filepath, printer_name, color_mode='mono', duplex='one-side
         logger.info(f"执行打印命令: {' '.join(cmd)}")
         logger.info(f"打印参数: color_mode={color_mode}, duplex={duplex}, orientation={orientation}, paper_size={paper_size}, paper_type={paper_type}, copies={copies}, page_range={page_range}")
 
+        # 记录队列是否具备“出纸完成后再结束任务”的前提：
+        # ipp:// 且未关闭 waitjob 时，CUPS 的 IPP backend 会等待打印机终态。
+        # 其他连接方式（usb/socket/lpd）只能确认数据已发送，完成文案需降级。
+        completion_confirmed = is_ipp_waitjob_enabled(printer_name)
+        if not completion_confirmed:
+            logger.warning(f"打印机 {printer_name} 不是 ipp:// 队列或 waitjob 已关闭，无法确认出纸完成")
+
         # 执行打印命令（强制 LC_ALL=C，确保 "request id is ..." 解析稳定，避免非英文 locale 下提取不到 CUPS 任务 ID）
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=30,
             env={**os.environ, 'LC_ALL': 'C'}
         )
 
-        # 提取CUPS任务ID
+        # 提取CUPS任务ID，格式通常是 "request id is PDF_Printer-1 (1 file(s))"
         cups_job_id = None
         if result.returncode == 0:
-            # 从输出中提取任务ID，格式通常是 "request id is PDF_Printer-1 (1 file(s))"
-            output = result.stdout.strip()
-            if 'request id' in output.lower():
-                # 提取包含打印机名称和任务ID的部分
-                words = output.split()
-                for word in words:
-                    # 查找格式为 "PrinterName-123" 的词
-                    if '-' in word:
-                        parts = word.split('-')
-                        if len(parts) >= 2:
-                            # 检查最后一部分是否为纯数字（任务ID）
-                            potential_id = parts[-1]
-                            if potential_id.isdigit():
-                                cups_job_id = potential_id
-                                break
-
+            match = re.search(r'request id is .+-(\d+)', result.stdout, re.IGNORECASE)
+            if match:
+                cups_job_id = match.group(1)
+            else:
+                logger.warning(f"lp 输出中未找到任务 ID：{result.stdout.strip()}")
 
         # 更新任务状态
+        if result.returncode == 0:
+            job_status = 'submitted' if cups_job_id else 'unknown'
+            job_message = msg('job.submitted') if cups_job_id else msg('job.no_job_id_submitted')
+        else:
+            job_status = 'failed'
+            stderr_text = result.stderr.strip()
+            job_message = (
+                msg('job.submit_failed', detail=stderr_text)
+                if stderr_text else msg('job.submit_failed_no_detail')
+            )
+
         with print_jobs_lock:
             print_jobs[job_id] = {
                 'id': job_id,
@@ -1153,14 +1312,16 @@ def submit_print_job(filepath, printer_name, color_mode='mono', duplex='one-side
                 'page_range': page_range,
                 'print_scaling': print_scaling,
                 'mirror': mirror,
+                'completion_confirmed': completion_confirmed,
                 'actual_print_file': actual_print_file,
-                'status': 'submitted' if result.returncode == 0 else 'failed',
-                'message': result.stdout if result.returncode == 0 else result.stderr,
+                'status': job_status,
+                'message_code': job_message.code,
+                'message_params': job_message.params,
                 'timestamp': datetime.now().isoformat(),
                 'progress': 0
             }
 
-        if result.returncode == 0:
+        if result.returncode == 0 and cups_job_id:
             # 启动后台线程监控进度
             logger.info(f"启动监控线程：job_id={job_id}, cups_job_id={cups_job_id}, printer_name={printer_name}")
             monitor_thread = threading.Thread(
@@ -1179,7 +1340,10 @@ def submit_print_job(filepath, printer_name, color_mode='mono', duplex='one-side
                 'filename': os.path.basename(filepath),
                 'printer': printer_name,
                 'status': 'error',
-                'message': str(e),
+                'message_code': 'job.error',
+                'message_params': {'detail': str(e)},
+                # 记录实际打印文件，异常时也能在用户删除任务记录时清掉 /tmp 抽取页 PDF
+                'actual_print_file': actual_print_file,
                 'timestamp': datetime.now().isoformat(),
                 'progress': 0
             }
@@ -1191,18 +1355,24 @@ def get_job_final_state(printer_name, cups_job_id):
 
     任务离开活动队列并不等于成功完成，可能是被取消或中止。
     通过 lpstat -l -W all 解析该任务的属性块，读取其中的 Alerts/Alert 字段判断：
-    - 包含 cancel: 被取消（如 job-canceled-by-user）
-    - 包含 abort: 被中止（如 job-aborted-by-system）
-    - 其余（processing-to-stop-point / none / 空）: 正常完成
-    - 两个队列都找不到该任务行: CUPS 重启或队列被清空，状态无法确认
+    - 包含 cancel: 被取消（如 job-canceled-by-user / cups-remote-canceled）
+    - 包含 abort 或 job-completed-with-errors: 被中止或出错
+    - 包含 cups-ipp-missing-get-job-attributes / missing-job-history /
+      missing-job-state / missing-job-id: IPP backend 实际无法等待打印机终态，
+      返回 unknown（即使同时出现 completed 关键字也不能确认出纸完成）
+    - 明确包含 job-completed-successfully / job-completed-with-warnings /
+      cups-remote-completed: 正常完成
+    - 其余（none / 空 / 无法识别）: 不能默认为完成，返回 unknown 并保留原始原因
+    - 找不到该任务行: CUPS 重启或队列被清空，状态无法确认
 
     Returns:
-        'completed' / 'cancelled' / 'failed' / 'unknown'
+        (state, reason)，state 为 'completed' / 'cancelled' / 'failed' / 'unknown'，
+        reason 为 CUPS 的 Alerts 原文（可能为空）
     """
     try:
         result = _lpstat(['-l', '-W', 'all', '-o', printer_name])
         if result.returncode != 0:
-            return 'unknown'
+            return 'unknown', ''
 
         job_prefix = f"{printer_name}-{cups_job_id} "
         lines = result.stdout.split('\n')
@@ -1225,7 +1395,7 @@ def get_job_final_state(printer_name, cups_job_id):
 
         if not found:
             # 任务行都找不到（CUPS 重启 / 队列已清空），无法确认
-            return 'unknown'
+            return 'unknown', ''
 
         # 在属性块中查找 Alerts/Alert 字段（兼容不同 CUPS 版本的大小写）
         alerts = ''
@@ -1235,14 +1405,48 @@ def get_job_final_state(printer_name, cups_job_id):
                 break
 
         if 'cancel' in alerts:
-            return 'cancelled'
-        if 'abort' in alerts:
-            return 'failed'
-        # 其余情况（processing-to-stop-point / none / 空）均视为正常完成
-        return 'completed'
+            return 'cancelled', alerts
+        if 'abort' in alerts or 'job-completed-with-errors' in alerts:
+            return 'failed', alerts
+        # IPP backend 实际上没能等待打印机终态（不支持 Get-Job-Attributes、
+        # 打印机关闭了作业历史/状态查询、或未返回 job-id）。
+        # 此时即使出现 completed，也只能说明本地后端已结束，不能确认出纸完成。
+        unconfirmed_reasons = (
+            'cups-ipp-missing-get-job-attributes',
+            'cups-ipp-missing-job-history',
+            'cups-ipp-missing-job-state',
+            'cups-ipp-missing-job-id',
+        )
+        if any(reason in alerts for reason in unconfirmed_reasons):
+            return 'unknown', alerts
+        # 只有明确的完成证据才算完成；none/空/未知原因一律不下结论
+        if ('job-completed-successfully' in alerts or
+                'job-completed-with-warnings' in alerts or
+                'cups-remote-completed' in alerts):
+            return 'completed', alerts
+        return 'unknown', alerts
     except Exception as e:
         logger.error(f"查询任务最终状态失败：{e}")
-        return 'unknown'
+        return 'unknown', ''
+
+
+def _active_job_state(block_lines):
+    """从 lpstat -l 的任务属性块判断是否被 hold / stopped。
+
+    只看 Status:/Alerts: 行：属性块里还有 "File: xxx.pdf"，
+    若扫描整块文本，文件名含 stop/hold/pause（如 stop-sign.pdf）会被误判。
+    """
+    reasons = []
+    for line in block_lines[1:]:
+        s = line.strip()
+        if s.lower().startswith(('status:', 'alerts:', 'alert:')):
+            reasons.append(s.split(':', 1)[1].strip().lower())
+    attrs_text = '\n'.join(reasons)
+    if 'hold' in attrs_text or 'pause' in attrs_text:
+        return 'held'
+    if 'stop' in attrs_text:
+        return 'stopped'
+    return None
 
 
 def monitor_job_progress(job_id, cups_job_id, printer_name):
@@ -1250,14 +1454,27 @@ def monitor_job_progress(job_id, cups_job_id, printer_name):
     监控打印任务进度（根据队列位置）
 
     每秒检查任务是否在 CUPS 队列中：
-    - 不在队列：任务完成
+    - 不在队列：连续两次确认后读取 CUPS 历史属性判定终态
     - 在队列中且为最小 job ID：处于队首，开始处理计时
     - 在队列中但不是最小 job ID：排队等待
-    - 最大监控时间：10 分钟
+    - hold / stopped：提示等待人工处理，不再假装打印中
+    - 超过 10 分钟：继续监控，状态中显示已执行时长
+    - 安全上限：2 小时（避免线程永久存活）
+
+    容错：查询失败按 1 秒间隔重试，仅用于覆盖网络丢包等短暂抖动；
+    连续 5 次失败说明 CUPS 本身不可用（如 cupsd 重启），标记 error 并退出监控。
+    单次查不到任务不算数，需连续两次确认后才会去读取终态。
     """
     start_time = time.time()
     processing_start_time = None
-    max_monitor_time = 10 * 60
+    max_monitor_time = 2 * 60 * 60
+    long_job_notice_time = 10 * 60
+    max_query_failures = 5
+    missing_confirmations = 2
+    max_unknown_confirmations = 3
+    consecutive_query_failures = 0
+    missing_streak = 0
+    unknown_streak = 0
 
     while True:
         with print_jobs_lock:
@@ -1270,42 +1487,87 @@ def monitor_job_progress(job_id, cups_job_id, printer_name):
             logger.debug(f"任务 {job_id} 已取消，停止监控")
             break
 
-        if cups_job_id is None:
-            logger.warning(f"任务 {job_id} 缺少 CUPS job ID，无法跟踪进度，放弃监控")
-            break
-
         elapsed_time = time.time() - start_time
+        elapsed_minutes = int(elapsed_time // 60)
 
         if elapsed_time >= max_monitor_time:
             with print_jobs_lock:
                 if job_id in print_jobs:
                     print_jobs[job_id]['status'] = 'timeout'
-                    print_jobs[job_id]['progress'] = 50
-                    print_jobs[job_id]['message'] = f'监控超时（已运行{int(elapsed_time/60)}分钟）'
-            logger.warning(f"任务 {job_id} 超时")
+                    print_jobs[job_id]['progress'] = 90
+                    print_jobs[job_id].update(_message_fields('job.timeout', minutes=elapsed_minutes))
+            logger.warning(f"任务 {job_id} 超过 {int(max_monitor_time/60)} 分钟仍未结束，停止监控")
             break
 
         try:
-            queue_result = _lpstat(['-o', printer_name])
+            # 用 -l 获取任务属性块，才能识别 hold / stopped，而不是只看“在不在队列”
+            queue_result = _lpstat(['-l', '-o', printer_name])
 
-            job_in_queue = (
-                queue_result.returncode == 0 and
-                any(line.strip().startswith(f"{printer_name}-{cups_job_id} ")
-                    for line in queue_result.stdout.split('\n'))
-            )
+            if queue_result.returncode != 0:
+                consecutive_query_failures += 1
+                logger.warning(
+                    f"查询任务 {job_id} 队列失败（第 {consecutive_query_failures} 次）："
+                    f"{queue_result.stderr.strip()}"
+                )
+                if consecutive_query_failures < max_query_failures:
+                    # 短暂抖动（如网络丢包）重试即可
+                    time.sleep(1)
+                    continue
+                # 连续失败说明 CUPS 本身不可用（如 cupsd 重启），不是任务终态。
+                # 标记 error 并退出监控，避免误判成 completed/unknown，也避免线程空转。
+                with print_jobs_lock:
+                    if job_id in print_jobs:
+                        print_jobs[job_id]['status'] = 'error'
+                        print_jobs[job_id].update(_message_fields('job.query_failed'))
+                logger.error(
+                    f"任务 {job_id} 连续 {max_query_failures} 次查询队列失败，停止监控"
+                )
+                break
+            consecutive_query_failures = 0
+
+            # 按 job 头行分组：头行形如 "Printer-123 user 1024 ..."，
+            # 后续缩进行是该任务的属性（Alerts 等）
+            blocks = {}
+            current_id = None
+            for line in queue_result.stdout.splitlines():
+                m = re.match(rf'{re.escape(printer_name)}-(\d+)\s', line)
+                if m:
+                    current_id = int(m.group(1))
+                    blocks[current_id] = [line]
+                elif current_id is not None:
+                    blocks[current_id].append(line)
+
+            current_cups_id = int(cups_job_id)
+            job_in_queue = queue_result.returncode == 0 and current_cups_id in blocks
 
             if job_in_queue:
-                # 解析队列中所有 CUPS job ID
-                all_ids = []
-                for line in queue_result.stdout.split('\n'):
-                    m = re.match(rf'{re.escape(printer_name)}-(\d+)\s', line.strip())
-                    if m:
-                        all_ids.append(int(m.group(1)))
+                missing_streak = 0
+                unknown_streak = 0
+                job_state = _active_job_state(blocks[current_cups_id])
 
-                current_cups_id = int(cups_job_id)
-                is_front = all_ids and current_cups_id == min(all_ids)
+                # 被 hold / stopped 的任务不参与“队首”判断，避免阻塞后续任务
+                printable_ids = [
+                    jid for jid in blocks
+                    if jid == current_cups_id or _active_job_state(blocks[jid]) is None
+                ]
+                is_front = printable_ids and current_cups_id == min(printable_ids)
 
-                if is_front:
+                if job_state == 'held':
+                    with print_jobs_lock:
+                        if job_id in print_jobs:
+                            print_jobs[job_id]['status'] = 'held'
+                            print_jobs[job_id].update(_message_fields('job.held'))
+                    # 只在状态切换时记录，避免每秒一条日志
+                    if job_status != 'held':
+                        logger.warning(f"任务 {job_id} 处于 hold 状态，等待人工恢复")
+                elif job_state == 'stopped':
+                    with print_jobs_lock:
+                        if job_id in print_jobs:
+                            print_jobs[job_id]['status'] = 'stopped'
+                            print_jobs[job_id].update(_message_fields('job.stopped'))
+                    if job_status != 'stopped':
+                        logger.warning(f"任务 {job_id} 处于 stopped 状态，等待人工处理")
+                elif is_front:
                     # 队首：开始或继续处理计时
                     if processing_start_time is None:
                         processing_start_time = time.time()
@@ -1315,54 +1577,91 @@ def monitor_job_progress(job_id, cups_job_id, printer_name):
                         if job_id in print_jobs:
                             print_jobs[job_id]['status'] = 'processing'
                             print_jobs[job_id]['progress'] = progress
-                            print_jobs[job_id]['message'] = f'打印中... ({progress}%)'
+                            if elapsed_time >= long_job_notice_time:
+                                print_jobs[job_id].update(_message_fields('job.processing_long', minutes=elapsed_minutes))
+                            else:
+                                print_jobs[job_id].update(_message_fields('job.processing', percent=progress))
                     logger.debug(f"任务 {job_id} 正在打印，进度：{progress}%")
                 else:
                     # 排队中：重置处理计时，显示前方任务数
                     processing_start_time = None
-                    sorted_ids = sorted(all_ids)
+                    sorted_ids = sorted(printable_ids)
                     position = sorted_ids.index(current_cups_id)
                     with print_jobs_lock:
                         if job_id in print_jobs:
                             print_jobs[job_id]['status'] = 'queued'
                             print_jobs[job_id]['progress'] = 0
-                            print_jobs[job_id]['message'] = f'排队中（前方 {position} 个任务）'
+                            if elapsed_time >= long_job_notice_time:
+                                print_jobs[job_id].update(_message_fields('job.queued_long', position=position, minutes=elapsed_minutes))
+                            else:
+                                print_jobs[job_id].update(_message_fields('job.queued', position=position))
                     logger.debug(f"任务 {job_id} 排队中，前方 {position} 个任务")
             else:
+                # 单次成功查询里看不到任务不算数，需连续两次确认，避免调度竞态
+                if queue_result.returncode == 0:
+                    missing_streak += 1
+                    if missing_streak < missing_confirmations:
+                        time.sleep(1)
+                        continue
+
                 # 任务不在活动队列：确认最终状态（可能完成、被取消或被中止）
-                final_state = get_job_final_state(printer_name, cups_job_id)
+                final_state, final_reason = get_job_final_state(printer_name, cups_job_id)
+
+                # 终态暂时查不到可能是历史属性尚未落盘，连续确认仍未知才定论
+                if final_state == 'unknown' and queue_result.returncode == 0:
+                    unknown_streak += 1
+                    if unknown_streak < max_unknown_confirmations:
+                        time.sleep(1)
+                        continue
+
                 if final_state == 'completed':
                     if processing_start_time is None:
                         processing_start_time = start_time
                     total_time = int(time.time() - processing_start_time)
+                    completion_confirmed = False
                     with print_jobs_lock:
                         if job_id in print_jobs:
-                            print_jobs[job_id]['status'] = 'completed'
+                            completion_confirmed = print_jobs[job_id].get('completion_confirmed', False)
+                            # 非 ipp:// 或 waitjob=off 时，只能确认“已发送”，不能确认出纸完成，
+                            # 因此用独立的 sent 状态，避免界面显示绿色的“已完成”。
+                            print_jobs[job_id]['status'] = 'completed' if completion_confirmed else 'sent'
                             print_jobs[job_id]['progress'] = 100
-                            print_jobs[job_id]['message'] = f'打印完成 (耗时{total_time}秒)'
-                    logger.info(f"任务 {job_id} 已完成")
+                            if completion_confirmed:
+                                print_jobs[job_id].update(_message_fields('job.completed', seconds=total_time))
+                            else:
+                                print_jobs[job_id].update(_message_fields('job.sent_unconfirmed', seconds=total_time))
+                    logger.info(f"任务 {job_id} 已结束（{'完成' if completion_confirmed else '已发送，出纸未确认'}）")
                     cleanup_temp_file(job_id)
                 elif final_state == 'cancelled':
                     with print_jobs_lock:
                         if job_id in print_jobs:
                             print_jobs[job_id]['status'] = 'cancelled'
                             print_jobs[job_id]['progress'] = 0
-                            print_jobs[job_id]['message'] = '打印任务已被取消，请检查打印机'
-                    logger.info(f"任务 {job_id} 已被取消")
+                            if final_reason:
+                                print_jobs[job_id].update(_message_fields('job.cancelled_reason', reason=final_reason))
+                            else:
+                                print_jobs[job_id].update(_message_fields('job.cancelled'))
+                    logger.info(f"任务 {job_id} 已被取消：{final_reason or '无原因'}")
                 elif final_state == 'failed':
                     with print_jobs_lock:
                         if job_id in print_jobs:
                             print_jobs[job_id]['status'] = 'failed'
                             print_jobs[job_id]['progress'] = 0
-                            print_jobs[job_id]['message'] = '打印任务已中止，请检查打印机状态'
-                    logger.warning(f"任务 {job_id} 已中止")
+                            if final_reason:
+                                print_jobs[job_id].update(_message_fields('job.failed_reason', reason=final_reason))
+                            else:
+                                print_jobs[job_id].update(_message_fields('job.failed'))
+                    logger.warning(f"任务 {job_id} 已中止：{final_reason or '无原因'}")
                 else:
                     with print_jobs_lock:
                         if job_id in print_jobs:
                             print_jobs[job_id]['status'] = 'unknown'
                             print_jobs[job_id]['progress'] = 0
-                            print_jobs[job_id]['message'] = '打印状态无法确认，请查看打印机输出'
-                    logger.warning(f"任务 {job_id} 状态无法确认（可能 CUPS 重启或队列被清空）")
+                            if final_reason:
+                                print_jobs[job_id].update(_message_fields('job.unknown_reason', reason=final_reason))
+                            else:
+                                print_jobs[job_id].update(_message_fields('job.unknown'))
+                    logger.warning(f"任务 {job_id} 状态无法确认（{final_reason or '可能 CUPS 重启或队列被清空'}）")
                 break
 
         except Exception as e:
@@ -1376,7 +1675,10 @@ def cleanup_temp_file(job_id):
     """
     清理打印任务的临时文件
 
-    只清理 /tmp 目录下的临时文件，previews 目录的文件保留
+    只清理 /tmp 目录下的临时文件，previews 目录的文件保留。
+
+    注意：失败/取消/超时等任务不在此清理临时文件，保留它们是为了让用户可以直接重试；
+    这些文件会在用户删除对应的上传文件时，由 api_delete_file 中的 glob 逻辑统一清理。
     """
     with print_jobs_lock:
         if job_id not in print_jobs:
@@ -1402,25 +1704,41 @@ def get_printer_queue(printer_name):
     status = "unknown"
     
     try:
-        # 获取打印队列
-        result = _lpstat(['-o'])
+        # 使用 -l 获取长格式，其中的 "File:" 行才是真实文件名。
+        # 注意：普通 lpstat -o 的输出为 "printer-123 user size 日期 时间"，
+        # 其中并没有文件名，不能把日期字段当文件名。
+        result = _lpstat(['-l', '-o'])
         if result.returncode == 0 and result.stdout.strip():
-            lines = result.stdout.strip().split('\n')
-            for line in lines:
-                if line.strip():
-                    # lpstat -o 输出格式: "printer-name-123    username    1024   filename"
-                    parts = [part for part in line.split() if part]
-                    if len(parts) >= 4:
-                        # 第一部分是 printer-jobID
-                        job_info = parts[0]
-                        # 检查是否属于指定打印机
-                        if job_info.startswith(f"{printer_name}-"):
-                            queue.append({
-                                'job_id': job_info.split('-')[-1],
-                                'user': parts[1],
-                                'size': parts[2],
-                                'filename': ' '.join(parts[3:])
-                            })
+            lines = result.stdout.split('\n')
+            current = None
+            for raw_line in lines:
+                if not raw_line.strip():
+                    continue
+                if not raw_line[0].isspace():
+                    # 任务头：printer-123 user size 日期 时间
+                    parts = raw_line.split()
+                    match = re.match(rf'^{re.escape(printer_name)}-(\d+)$', parts[0])
+                    if match:
+                        job_id = match.group(1)
+                        current = {
+                            'job_id': job_id,
+                            'user': parts[1] if len(parts) > 1 else '',
+                            'size': parts[2] if len(parts) > 2 else '',
+                            # lpstat 头行的剩余字段即提交日期时间，例如 "Mon 10 Nov 2025 03:15:00 PM"
+                            'submitted': ' '.join(parts[3:]) if len(parts) > 3 else '',
+                            # 没有 File: 信息时回退到任务号，避免展示错误内容
+                            'filename': f'#{job_id}'
+                        }
+                        queue.append(current)
+                    else:
+                        current = None
+                elif current is not None:
+                    # 任务详情行：File: /path/to/file.pdf
+                    field = raw_line.strip()
+                    if field.lower().startswith('file:'):
+                        value = field.split(':', 1)[1].strip()
+                        if value:
+                            current['filename'] = os.path.basename(value)
     except Exception as e:
         logger.error(f"获取打印队列失败: {e}")
     
@@ -1428,13 +1746,7 @@ def get_printer_queue(printer_name):
         # 获取打印机状态
         printer_status = _lpstat(['-p', printer_name])
         if printer_status.returncode == 0:
-            status_line = printer_status.stdout.strip()
-            if "idle" in status_line.lower():
-                status = "idle"
-            elif "printing" in status_line.lower():
-                status = "printing"
-            elif "disabled" in status_line.lower():
-                status = "disabled"
+            status = _parse_printer_state(printer_status.stdout)
         else:
             logger.warning(f"获取打印机状态失败: {printer_status.stderr}")
     except Exception as e:
@@ -1496,7 +1808,7 @@ def api_printer_status(printer_name):
         # 获取单台打印机信息
         printer = get_single_printer_status(printer_name, timeout=5)
         if not printer:
-            return jsonify({'error': '打印机不存在'}), 404
+            return _api_error('error.printer_not_found', 404)
         
         return jsonify({
             'name': printer['name'],
@@ -1510,13 +1822,15 @@ def api_printer_status(printer_name):
             'name': printer_name,
             'status': 'unknown',
             'online_status': 'unknown',
-            'error': str(e)
+            'error': t('error.printer_status_failed', get_request_lang(), detail=str(e)),
+            'error_code': 'error.printer_status_failed'
         }), 500
 
 
 @app.route('/api/printer/<printer_name>', methods=['GET'])
 def api_printer_detail(printer_name):
     """获取单台打印机详细信息（墨盒、纸盒、队列信息）"""
+    lang = get_request_lang()
     printer_data = {
         'name': printer_name,
         'status': 'unknown',
@@ -1551,27 +1865,45 @@ def api_printer_detail(printer_name):
                             printer_data['printer_info'] = all_info.get('printer_info', {})
                             printer_data['ipp_status'] = all_info.get('ipp_status', {})
                             if all_info.get('error'):
-                                printer_data['source'] = f'ipptool 查询失败：{all_info.get("error")}'
+                                printer_data['source'] = t('source.ipptool_failed', lang, detail=all_info.get('error'))
                             else:
-                                printer_data['source'] = f'ipptool: {printer_uri}'
+                                printer_data['source'] = t('source.ipptool', lang, uri=printer_uri)
                         except Exception as e:
                             logger.error(f"通过 ipptool 获取打印机信息失败：{e}")
-                            printer_data['source'] = 'ipptool（查询失败）'
+                            printer_data['source'] = t('source.ipptool_failed_short', lang)
                     else:
-                        printer_data['source'] = 'ipptool 不可用'
+                        printer_data['source'] = t('source.ipptool_unavailable', lang)
                 else:
                     printer_data['status'] = 'idle'
-                    printer_data['source'] = '不支持的打印机类型'
+                    printer_data['source'] = t('source.unsupported', lang)
                 break
     except Exception as e:
         logger.error(f"获取打印机信息失败：{e}")
     
     # 获取打印队列
     queue_info = get_printer_queue(printer_name)
+
+    # 打印过程中打印机断电/重启会导致 CUPS 停用队列：设备重新在线后队列仍保持禁用，
+    # 表现为页面显示“已禁用”、新任务只排队不打印。检测到在线但队列被停用时自动恢复。
+    if queue_info.get('status') in ('disabled', 'stopped'):
+        printer_uri = printer_data.get('uri')
+        is_online = False
+        # 先查冷却再探测：队列持续停用时避免每轮轮询都执行最长数秒的在线探测
+        if printer_uri and check_printer_online and not _recover_cooldown_active(printer_name):
+            try:
+                is_online = bool(check_printer_online(printer_uri, timeout=5).get('online'))
+            except Exception as e:
+                logger.warning(f"自动恢复前探测打印机 {printer_name} 在线状态失败：{e}")
+        if is_online:
+            logger.warning(f"打印机 {printer_name} 在线但 CUPS 队列已停用，尝试自动重新启用")
+            if try_recover_disabled_printer(printer_name):
+                time.sleep(0.3)
+                queue_info = get_printer_queue(printer_name)
+
     printer_data['queue'] = queue_info.get('queue', [])
     if queue_info.get('status') != 'unknown':
         printer_data['status'] = queue_info.get('status')
-    
+
     return jsonify(printer_data)
 
 @app.route('/api/upload-cancel/<token>', methods=['DELETE'])
@@ -1597,25 +1929,23 @@ def api_upload_cancel(token):
 @app.route('/api/upload', methods=['POST'])
 def api_upload():
     """上传文件"""
+    lang = get_request_lang()
     if 'file' not in request.files:
-        return jsonify({'error': '没有文件'}), 400
+        return _api_error('error.no_file', 400)
     
     file = request.files['file']
     if file.filename == '':
-        return jsonify({'error': '未选择文件'}), 400
+        return _api_error('error.no_file_selected', 400)
     
     if file and allowed_file(file.filename):
         token = request.form.get('upload_token', '')
-        if token:
-            with _upload_tokens_lock:
-                _upload_tokens[token] = {'cancelled': False, 'files': []}
 
         try:
             # 获取文件名和扩展名（使用自定义 safe_filename 保留中文等非ASCII字符）
             original_filename = file.filename
             filename = safe_filename(original_filename, app.config['ALLOWED_EXTENSIONS'])
             if not filename:
-                return jsonify({'error': '不支持的文件类型'}), 400
+                return _api_error('error.unsupported_file_type', 400)
 
             # 添加时间戳避免文件名冲突
             name, ext = os.path.splitext(filename)
@@ -1623,11 +1953,34 @@ def api_upload():
             filename = f"{name}_{timestamp}{ext}"
             
             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            file.save(filepath)
+
+            # 文件名校验通过后才登记 token，避免非法请求把 token 永久留在字典里；
+            # 使用 setdefault 而不是覆盖，避免重复 token 让旧 entry 的文件失去引用。
+            if token:
+                with _upload_tokens_lock:
+                    _upload_tokens.setdefault(token, {'cancelled': False, 'files': []})
+
+            try:
+                file.save(filepath)
+            except Exception:
+                # save 过程中可能已写出半截文件，此时路径还未注册，需要显式删除
+                if os.path.exists(filepath):
+                    try:
+                        os.remove(filepath)
+                    except Exception as cleanup_error:
+                        logger.warning(f"删除半截上传文件失败：{filepath}, {cleanup_error}")
+                raise
 
             if token and _register_upload_file(token, filepath):
                 _cleanup_upload(token)
-                return jsonify({'error': '上传已取消'}), 499
+                # token 可能在并发取消时已被移除，_cleanup_upload 找不到 entry，
+                # 这里再兜底删除本次刚写入的文件
+                if os.path.exists(filepath):
+                    try:
+                        os.remove(filepath)
+                    except Exception as cleanup_error:
+                        logger.warning(f"删除已取消的上传文件失败：{filepath}, {cleanup_error}")
+                return _api_error('error.upload_cancelled', 499)
             
             # All file types: trigger conversion to PDF and generate preview images
             if is_document_file(filename) or ext.lower().endswith('.pdf') or is_image_file(filename):
@@ -1644,32 +1997,32 @@ def api_upload():
                         logger.error(f"上传时文档转换失败：{filename} - LibreOffice 转换未生成 PDF 文件")
                         logger.error(f"原始文件路径：{filepath}")
                         logger.error(f"预期 PDF 路径：{os.path.join(app.config['PREVIEW_FOLDER'], pdf_filename)}")
-                        conversion_warning = "文档转换失败，预览和打印将不可用，请检查 LibreOffice 是否安装或文档格式是否正确"
+                        conversion_warning = t('warning.doc_conversion_failed', lang)
                     else:
                         if token and _register_upload_file(token, pdf_path):
                             _cleanup_upload(token)
-                            return jsonify({'error': '上传已取消'}), 499
+                            return _api_error('error.upload_cancelled', 499)
                         logger.info(f"文档转换成功，生成预览图片：{pdf_path}")
                         images = convert_pdf_to_images(pdf_path, app.config['PREVIEW_FOLDER'], pdf_filename=pdf_filename)
                         if token and images and _register_upload_files(token, images):
                             _cleanup_upload(token)
-                            return jsonify({'error': '上传已取消'}), 499
+                            return _api_error('error.upload_cancelled', 499)
 
                 # For images, convert using img2pdf
                 elif is_image_file(filename):
                     pdf_path = convert_image_to_pdf(filepath, app.config['PREVIEW_FOLDER'])
                     if not pdf_path:
                         logger.error(f"上传时图片转换失败：{filename}")
-                        conversion_warning = "图片转换失败，预览和打印将不可用"
+                        conversion_warning = t('warning.image_conversion_failed', lang)
                     else:
                         if token and _register_upload_file(token, pdf_path):
                             _cleanup_upload(token)
-                            return jsonify({'error': '上传已取消'}), 499
+                            return _api_error('error.upload_cancelled', 499)
                         logger.info(f"图片转换成功，生成预览图片：{pdf_path}")
                         images = convert_pdf_to_images(pdf_path, app.config['PREVIEW_FOLDER'], pdf_filename=pdf_filename)
                         if token and images and _register_upload_files(token, images):
                             _cleanup_upload(token)
-                            return jsonify({'error': '上传已取消'}), 499
+                            return _api_error('error.upload_cancelled', 499)
 
                 # For PDFs, copy to previews and generate images
                 elif ext.lower().endswith('.pdf'):
@@ -1682,22 +2035,22 @@ def api_upload():
                             shutil.copy2(filepath, pdf_path)
                             if token and _register_upload_file(token, pdf_path):
                                 _cleanup_upload(token)
-                                return jsonify({'error': '上传已取消'}), 499
+                                return _api_error('error.upload_cancelled', 499)
                             logger.info(f"PDF 复制成功：{pdf_path}")
                         except Exception as copy_error:
                             logger.error(f"PDF 复制失败：{copy_error}")
-                            conversion_warning = "PDF 复制失败，预览和打印将不可用，请联系管理员"
+                            conversion_warning = t('warning.pdf_copy_failed', lang)
 
                     if is_valid_pdf(pdf_path):
                         logger.info(f"PDF 文件，生成预览图片：{pdf_path}")
                         images = convert_pdf_to_images(pdf_path, app.config['PREVIEW_FOLDER'], pdf_filename=pdf_filename)
                         if token and images and _register_upload_files(token, images):
                             _cleanup_upload(token)
-                            return jsonify({'error': '上传已取消'}), 499
+                            return _api_error('error.upload_cancelled', 499)
                     else:
                         logger.warning(f"PDF 文件不存在：{pdf_filename}")
                         if not conversion_warning:
-                            conversion_warning = "PDF 文件不存在，预览将不可用"
+                            conversion_warning = t('warning.pdf_missing_preview', lang)
 
                 # Get preview images (only if no conversion warning)
                 preview_images = []
@@ -1706,7 +2059,7 @@ def api_upload():
                     # 转换成功却未能生成任何预览图（如系统缺少 poppler-utils / pdftoppm），
                     # 给出明确警告，避免前端显示“上传成功”却看不到预览
                     if not preview_images:
-                        conversion_warning = "预览图片生成失败，可能无法预览（请确认系统已安装 poppler-utils / pdftoppm）"
+                        conversion_warning = t('warning.preview_image_failed', lang)
             
             response_data = {
                 'success': True,
@@ -1729,13 +2082,14 @@ def api_upload():
         except Exception as e:
             if token:
                 _cleanup_upload(token)
-            return jsonify({'error': f'文件保存失败: {str(e)}'}), 500
+            return _api_error('error.file_save_failed', 500, detail=str(e))
     
-    return jsonify({'error': '不支持的文件类型'}), 400
+    return _api_error('error.unsupported_file_type', 400)
 
 @app.route('/api/preview/<path:filename>', methods=['GET'])
 def api_preview(filename):
     """获取文件预览"""
+    lang = get_request_lang()
     try:
         # 安全检查：移除路径遍历字符
         filename = os.path.basename(filename)
@@ -1763,7 +2117,7 @@ def api_preview(filename):
                 )
             else:
                 logger.warning(f"预览图片不存在：{filename}, 路径：{image_path}")
-                return jsonify({'error': '预览图片不存在'}), 404
+                return _api_error('error.preview_image_missing', 404)
         
         # 对于 PDF 和文档文件，使用 get_preview_file 获取预览 PDF
         preview_file = get_preview_file(filename)
@@ -1779,18 +2133,20 @@ def api_preview(filename):
                 upload_path = get_safe_path(app.config['UPLOAD_FOLDER'], filename)
                 if not upload_path or not os.path.exists(upload_path):
                     return jsonify({
-                        'error': '文件不存在',
-                        'message': f'文件 {filename} 不存在或已被删除'
+                        'error': t('error.file_not_found', lang),
+                        'message': t('error.file_missing_message', lang, filename=filename),
+                        'error_code': 'error.file_not_found'
                     }), 404
                 else:
                     # 文件存在但预览不可用 - 预览文件不存在，需要重新上传
                     return jsonify({
-                        'error': '预览文件不存在',
-                        'message': f'文件 {filename} 的预览文件不存在，请重新上传该文件',
-                        'solution': '请删除该文件后重新上传，系统将自动生成预览文件'
+                        'error': t('error.preview_not_found', lang),
+                        'message': t('error.preview_not_found_message', lang, filename=filename),
+                        'solution': t('error.preview_not_found_solution', lang),
+                        'error_code': 'error.preview_not_found'
                     }), 500
             else:
-                return jsonify({'error': '无法预览此文件'}), 404
+                return _api_error('error.cannot_preview', 404)
         if os.path.exists(preview_file):
             # 获取文件所在的目录
             preview_dir = os.path.dirname(preview_file)
@@ -1824,10 +2180,10 @@ def api_preview(filename):
                     mimetype=mime_types.get(ext, 'application/octet-stream')
                 )
         else:
-            return jsonify({'error': '预览文件不存在'}), 404
+            return _api_error('error.preview_not_found', 404)
     except Exception as e:
         logger.error(f"获取预览失败: {e}")
-        return jsonify({'error': f'预览失败: {str(e)}'}), 500
+        return _api_error('error.preview_failed', 500, detail=str(e))
 
 @app.route('/api/files', methods=['GET'])
 def api_list_files():
@@ -1876,7 +2232,7 @@ def api_list_files():
         return jsonify({'success': True, 'files': files})
     except Exception as e:
         logger.error(f"获取文件列表失败: {e}")
-        return jsonify({'error': str(e)}), 500
+        return _api_error('error.list_files_failed', 500, detail=str(e))
 
 @app.route('/api/files/<path:filename>', methods=['DELETE'])
 def api_delete_file(filename):
@@ -1893,17 +2249,19 @@ def api_delete_file(filename):
     
     if not filepath:
         logger.warning(f"非法文件路径访问尝试: {filename}")
-        return jsonify({'error': '非法文件路径'}), 403
+        return _api_error('error.invalid_file_path', 403)
     
     # 检查是否有正在进行的打印任务
+    lang = get_request_lang()
     with print_jobs_lock:
         for job_id, job in print_jobs.items():
             if job['filename'] == filename:
-                if job['status'] in ['submitted', 'processing', 'queued']:
+                if job['status'] in ['submitted', 'processing', 'queued', 'held', 'stopped']:
                     logger.warning(f"文件 {filename} 正在打印中，无法删除 (任务状态：{job['status']})")
-                    return jsonify({
-                        'error': f'文件正在打印中，无法删除 (任务状态：{job["status"]})'
-                    }), 400
+                    return _api_error(
+                        'error.file_in_use', 400,
+                        status=t(f"status.{job['status']}", lang)
+                    )
     
     if os.path.exists(filepath):
         try:
@@ -1956,9 +2314,9 @@ def api_delete_file(filename):
             return jsonify({'success': True})
         except Exception as e:
             logger.error(f"删除文件失败: {e}")
-            return jsonify({'error': str(e)}), 500
+            return _api_error('error.delete_file_failed', 500, detail=str(e))
     
-    return jsonify({'error': '文件不存在'}), 404
+    return _api_error('error.file_not_found', 404)
 
 def validate_page_range(page_range):
     """验证页面范围格式"""
@@ -1967,40 +2325,60 @@ def validate_page_range(page_range):
     if ',' in page_range:
         return False
     pattern = r'^(\d+(-\d+)?)(\s+\d+(-\d+)?)*$'
-    return bool(re.match(pattern, page_range))
+    if not re.match(pattern, page_range):
+        return False
+    # 页码需从 1 开始，且起始页不能大于结束页（pdftk 不支持倒序范围）
+    for token in page_range.split():
+        if '-' in token:
+            start, end = token.split('-', 1)
+            if int(start) < 1 or int(end) < int(start):
+                return False
+        elif int(token) < 1:
+            return False
+    return True
 
 @app.route('/api/print', methods=['POST'])
 def api_print():
     """提交打印任务"""
     logger.info("=" * 80)
     logger.info("接收到打印请求")
+    lang = get_request_lang()
 
     # 记录原始数据
     logger.info(f"原始数据: {request.data}")
 
     try:
-        data = request.json
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            logger.error("打印请求体不是 JSON 对象")
+            return _api_error('error.invalid_json', 400)
         logger.info(f"解析后的JSON: {json.dumps(data, indent=2, ensure_ascii=False)}")
     except Exception as e:
         logger.error(f"JSON解析失败: {e}")
-        return jsonify({'error': '请求数据格式错误'}), 400
+        return _api_error('error.invalid_json_format', 400)
 
     filename = data.get('filename', data.get('filepath'))
+    if filename is not None and not isinstance(filename, str):
+        return _api_error('error.filename_not_string', 400)
     if filename:
         filename = os.path.basename(filename)
     filepath = get_safe_path(app.config['UPLOAD_FOLDER'], filename) if filename else None
     if not filepath:
         logger.warning(f"非法文件路径访问尝试: {filename}")
-        return jsonify({'error': '非法文件路径'}), 403
+        return _api_error('error.invalid_file_path', 403)
 
     printer_name = data.get('printer')
+    if printer_name is not None and not isinstance(printer_name, str):
+        return _api_error('error.printer_not_string', 400)
     color_mode = data.get('color_mode', 'mono')  # 默认改为mono（黑白）
-    duplex = data.get('duplex', 'one-sided')
+    duplex = data.get('duplex', 'two-sided-long-edge')
     orientation = data.get('orientation', 'portrait')
     paper_size = data.get('paper_size', 'A4')
     paper_type = data.get('paper_type', 'plain')
     copies = data.get('copies', 1)  # Default to int, not string
     page_range = data.get('page_range', None)
+    if page_range is not None and not isinstance(page_range, str):
+        return _api_error('error.page_range_not_string', 400)
     
     # 空字符串视为 None（无页面范围限制）
     if page_range is not None and not page_range.strip():
@@ -2026,74 +2404,86 @@ def api_print():
 
     # 基本参数验证
     if not filepath or not printer_name:
-        return jsonify({'error': '缺少必要参数'}), 400
+        return _api_error('error.missing_params', 400)
 
     # 防御性校验打印机名格式（即使后续 CUPS 列表校验被跳过，也拒绝畸形名，避免异常值传入 lp）
-    if not re.match(r'^[A-Za-z0-9_.\-]+$', printer_name or ''):
+    # 禁止前导 '-'，防止打印机名被当作命令行选项；长度限制避免异常超长参数
+    if not re.match(r'^(?!-)[A-Za-z0-9_.\-]{1,127}$', printer_name or ''):
         logger.warning(f"打印机名包含非法字符：{printer_name}")
-        return jsonify({'error': '打印机名称包含非法字符'}), 400
+        return _api_error('error.invalid_printer_name', 400)
 
     # 校验打印机必须存在于 CUPS 打印机列表（防止提交到不存在的队列/注入）
     try:
         available_printers = {p['name'] for p in get_printers_fast()}
-        if available_printers and printer_name not in available_printers:
-            logger.warning(f"打印请求使用了不存在的打印机：{printer_name}")
-            return jsonify({'error': f'打印机不存在：{printer_name}'}), 400
     except Exception as e:
-        # 获取打印机列表失败时放行（fail-open），避免偶发子进程错误影响正常打印
-        logger.warning(f"校验打印机列表失败，跳过校验：{e}")
+        # 获取打印机列表失败时拒绝请求（fail-closed），避免绕过队列存在性校验
+        logger.error(f"校验打印机列表失败：{e}")
+        return _api_error('error.printer_list_unavailable', 503)
+
+    if not available_printers:
+        # get_printers_fast 内部会吞掉 CUPS 异常并返回空列表，
+        # 因此空列表按“无法获取列表”处理，避免把 CUPS 故障误报成打印机不存在
+        logger.error("CUPS 打印机列表为空，无法校验打印请求")
+        return _api_error('error.printer_list_unavailable', 503)
+
+    if printer_name not in available_printers:
+        logger.warning(f"打印请求使用了不存在的打印机：{printer_name}")
+        return _api_error('error.printer_not_found_name', 400, printer=printer_name)
 
     if not os.path.exists(filepath):
-        return jsonify({'error': '文件不存在'}), 404
+        return _api_error('error.file_not_found', 404)
     
     # 注意：预览文件检查在 get_printable_file() 中进行，避免重复检查
     # 验证纸张大小
-    valid_paper_sizes = ['A4', 'A3', 'A2', 'A1', 'A5', 'A6', 'B4', 'B5', '3.5x5', '4x6', '5x7', '8x10']
+    valid_paper_sizes = ['auto', 'A4', 'A3', 'A2', 'A1', 'A5', 'A6', 'B4', 'B5', '3.5x5', '4x6', '5x7', '8x10', 'Letter', 'Legal', 'Executive', 'Tabloid']
     if paper_size not in valid_paper_sizes:
-        return jsonify({'error': f'无效的纸张大小，支持的格式: {", ".join(valid_paper_sizes)}'}), 400
+        return _api_error('error.invalid_paper_size', 400, sizes=', '.join(valid_paper_sizes))
 
     # 验证纸张材质
-    valid_paper_types = ['plain', 'photo', 'glossy', 'matte', 'envelope', 'cardstock', 'labels', 'auto']
+    valid_paper_types = ['plain', 'photo', 'glossy', 'matte', 'transparency', 'envelope', 'cardstock', 'labels', 'auto']
     if paper_type not in valid_paper_types:
-        return jsonify({'error': f'无效的纸张材质，支持的类型: {", ".join(valid_paper_types)}'}), 400
+        return _api_error('error.invalid_paper_type', 400, types=', '.join(valid_paper_types))
 
     # 验证打印份数
     try:
         copies = int(copies)
         if copies < 1 or copies > 99:
-            return jsonify({'error': '打印份数必须在1-99之间'}), 400
+            return _api_error('error.invalid_copies_range', 400)
     except (ValueError, TypeError):
-        return jsonify({'error': '打印份数必须是数字'}), 400
+        return _api_error('error.invalid_copies_type', 400)
 
     # 验证色彩模式
     if color_mode not in ['color', 'mono']:
-        return jsonify({'error': '色彩模式无效，必须是 color 或 mono'}), 400
+        return _api_error('error.invalid_color_mode', 400)
 
     # 验证双面设置
     if duplex not in ['one-sided', 'two-sided-long-edge', 'two-sided-short-edge']:
-        return jsonify({'error': '双面设置无效'}), 400
+        return _api_error('error.invalid_duplex', 400)
 
     # 验证打印方向
     if orientation not in ['portrait', 'landscape']:
-        return jsonify({'error': '打印方向无效，必须是 portrait 或 landscape'}), 400
+        return _api_error('error.invalid_orientation', 400)
 
     # 验证打印缩放设置
     valid_print_scalings = ['none', 'fill', 'fit', 'auto-fit', 'auto']
     if print_scaling not in valid_print_scalings:
-        return jsonify({'error': f'无效的打印缩放，支持的格式：{", ".join(valid_print_scalings)}'}), 400
+        return _api_error('error.invalid_scaling', 400, values=', '.join(valid_print_scalings))
 
     # 验证页面范围格式（可选）
     if page_range and page_range.strip():
         if not validate_page_range(page_range.strip()):
-            return jsonify({'error': '页面范围格式无效，请使用空格分隔（如：1-5 8 10-12）'}), 400
+            return _api_error('error.invalid_page_range', 400)
         page_range = page_range.strip()
 
     job_id, success = submit_print_job(filepath, printer_name, color_mode, duplex, orientation, paper_size, paper_type, copies, page_range, mirror, print_scaling)
 
+    # 无论成功还是失败都清理终态任务：失败的提交同样是终态记录，
+    # 只在成功路径清理会让长期失败的任务占满 JOB_MAX_COUNT 名额
+    _sweep_terminal_jobs()
+
     if success:
-        _sweep_terminal_jobs()   # 提交即清理：print_jobs 只在打印时增长，此处足以维持上限
         with print_jobs_lock:
-            job_data = _sanitize_job(print_jobs[job_id])
+            job_data = _sanitize_job(print_jobs[job_id], lang)
         return jsonify({
             'success': True,
             'job_id': job_id,
@@ -2101,24 +2491,27 @@ def api_print():
         })
     else:
         with print_jobs_lock:
-            error_message = print_jobs[job_id]['message']
+            failed_job = _sanitize_job(print_jobs[job_id], lang)
         return jsonify({
             'success': False,
-            'error': error_message
+            'error': failed_job.get('message', ''),
+            'error_code': failed_job.get('message_code')
         }), 500
 
 @app.route('/api/jobs/<job_id>', methods=['DELETE'])
 def api_cancel_job(job_id):
     """取消打印任务或删除已完成/失败的任务"""
     # 检查任务是否存在（加锁读取）
+    lang = get_request_lang()
     with print_jobs_lock:
         if job_id not in print_jobs:
-            return jsonify({'error': '任务不存在'}), 404
+            return _api_error('error.job_not_found', 404)
         job = print_jobs[job_id].copy()
 
-    # 检查任务状态
-    if job['status'] in ['completed', 'failed', 'cancelled']:
-        # 已完成、失败或已取消的任务，先清理临时文件，再删除
+    # 已完成、发送完成、失败、已取消、超时、状态未知或出错的任务，监控已经结束，
+    # 直接删除记录。unknown 也允许手动删除：监控已停止，记录本身不再更新。
+    if job['status'] in JOB_TERMINAL_STATES:
+        # 先清理临时文件，再删除
         cleanup_temp_file(job_id)
         with print_jobs_lock:
             if job_id in print_jobs:
@@ -2126,12 +2519,8 @@ def api_cancel_job(job_id):
                 logger.info(f"任务 {job_id} 已删除（状态：{job['status']}）")
         return jsonify({
             'success': True,
-            'message': '任务记录已删除'
+            'message': t('job.record_deleted', lang)
         })
-
-    # 检查任务是否已经结束（错误状态）
-    if job['status'] == 'error':
-        return jsonify({'error': f'任务处于错误状态，无法取消'}), 400
 
     # 保存当前进度
     current_progress = job.get('progress', 0)
@@ -2162,7 +2551,7 @@ def api_cancel_job(job_id):
                     if job_id in print_jobs:
                         print_jobs[job_id]['status'] = 'cancelled'
                         print_jobs[job_id]['progress'] = current_progress
-                        print_jobs[job_id]['message'] = f'任务已取消 (用户手动取消)'
+                        print_jobs[job_id].update(_message_fields('job.manual_cancelled'))
                 # 清理临时文件
                 cleanup_temp_file(job_id)
                 # 启动后台线程，5 秒后删除任务
@@ -2171,60 +2560,50 @@ def api_cancel_job(job_id):
                 remove_thread.start()
                 return jsonify({
                     'success': True,
-                    'message': '打印任务已取消，5 秒后从列表删除'
+                    'message': t('job.cancel_requested', lang)
                 })
             else:
-                # CUPS 取消失败，但本地标记为已取消
-                logger.warning(f"CUPS 取消任务失败：{result.stderr}")
-                with print_jobs_lock:
-                    if job_id in print_jobs:
-                        print_jobs[job_id]['status'] = 'cancelled'
-                        print_jobs[job_id]['progress'] = current_progress
-                        print_jobs[job_id]['message'] = f'任务已取消 (CUPS 取消失败，但本地已标记为取消)'
-                # 清理临时文件
-                cleanup_temp_file(job_id)
-                # 启动后台线程，5 秒后删除任务
-                remove_thread = threading.Thread(target=remove_job_after_delay, args=(job_id, 5))
-                remove_thread.daemon = True
-                remove_thread.start()
-                return jsonify({
-                    'success': True,
-                    'message': '任务已标记为取消（CUPS 可能已完成），5 秒后从列表删除'
-                })
+                # CUPS 取消失败：不要假装取消成功，否则页面显示已取消但打印机仍在出纸。
+                # 保持任务记录不变，交给监控线程继续跟踪真实状态。
+                stderr_text = result.stderr.strip()
+                logger.warning(f"CUPS 取消任务失败：{stderr_text}")
+                return _api_error(
+                    'error.cancel_failed', 409,
+                    detail=stderr_text or t('error.cancel_failed_default_detail', lang)
+                )
         except Exception as e:
             logger.error(f"取消任务异常：{e}")
-            return jsonify({
-                'success': False,
-                'error': str(e)
-            }), 500
+            return _api_error('error.cancel_exception', 500, detail=str(e))
     else:
-        # 如果没有 cups_job_id，直接标记为取消
-        with print_jobs_lock:
-            if job_id in print_jobs:
-                print_jobs[job_id]['status'] = 'cancelled'
-                print_jobs[job_id]['progress'] = current_progress
-                print_jobs[job_id]['message'] = f'任务已取消 (用户手动取消)'
-        # 启动后台线程，5 秒后删除任务
-        remove_thread = threading.Thread(target=remove_job_after_delay, args=(job_id, 5))
-        remove_thread.daemon = True
-        remove_thread.start()
-        return jsonify({
-            'success': True,
-            'message': '任务已标记为取消，5 秒后从列表删除'
-        })
+        # 能走到这里的非终态任务都带 CUPS 任务 ID；缺失说明数据异常，
+        # 不能假装已取消（否则页面显示已取消但打印机可能仍在出纸）。
+        return _api_error(
+            'error.cancel_failed', 409,
+            detail=t('error.cancel_failed_default_detail', lang)
+        )
 
 @app.route('/api/jobs', methods=['GET'])
 def api_all_jobs():
-    """获取所有任务"""
+    """获取所有任务（按查看者语言渲染任务消息）"""
+    lang = get_request_lang()
     with print_jobs_lock:
-        jobs = [_sanitize_job(j) for j in print_jobs.values()]
+        jobs = [_sanitize_job(j, lang) for j in print_jobs.values()]
     return jsonify({'jobs': jobs})
 
-@app.route('/api/printer-queue/<printer_name>', methods=['GET'])
-def api_printer_queue(printer_name):
-    """获取特定打印机的队列信息"""
-    queue_info = get_printer_queue(printer_name)
-    return jsonify(queue_info)
+@app.route('/healthz')
+def healthz():
+    """容器健康检查：Web 服务可响应，且 CUPS 守护进程可用"""
+    try:
+        cups_ok = subprocess.run(
+            ['lpstat', '-r'], capture_output=True, timeout=3
+        ).returncode == 0
+    except Exception:
+        cups_ok = False
+    return jsonify({
+        'status': 'ok' if cups_ok else 'degraded',
+        'cups': cups_ok
+    }), (200 if cups_ok else 503)
+
 
 if __name__ == '__main__':
     print("=" * 60)

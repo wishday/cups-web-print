@@ -125,12 +125,15 @@
 
                         <!-- 预览状态 -->
                         <div id="previewState" class="absolute inset-0 hidden flex flex-col overflow-hidden">
-                            <div class="bg-gray-800 text-white px-4 py-3 flex items-center justify-between gap-3 flex-shrink-0">
-                                <div class="flex items-center gap-3 min-w-0 flex-1">
+                            <div class="bg-gray-800 text-white px-4 py-3 flex flex-wrap items-center gap-x-3 gap-y-2 flex-shrink-0">
+                                <div class="flex items-center gap-3 flex-1 min-w-[12rem]">
                                     <span id="previewFileName" class="truncate break-all"></span>
-                                    <span id="previewFileSize" class="text-xs text-gray-400 flex-shrink-0"></span>
                                 </div>
-                                <div class="flex items-center gap-2 flex-shrink-0">
+                                <div class="flex items-center gap-2 flex-shrink-0 ml-auto">
+                                    <a id="openPreviewInNewTab" href="#" target="_blank" rel="noopener noreferrer"
+                                       class="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded whitespace-nowrap inline-flex items-center hidden">
+                                        Open in new tab
+                                    </a>
                                     <label for="fileInput" class="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded cursor-pointer whitespace-nowrap">
                                         Change
                                     </label>
@@ -177,6 +180,7 @@
                         <div>
                             <label class="block text-sm font-medium text-gray-700 mb-2">Paper Size</label>
                             <select id="paperSize" class="w-full border border-gray-300 rounded-lg px-4 py-2">
+                                <option value="auto">Printer Default / Auto</option>
                                 <option value="A4" selected>A4 (21.0×29.7cm)</option>
                                 <option value="A3">A3 (29.7×42.0cm)</option>
                                 <option value="A2">A2 (42.0×59.4cm)</option>
@@ -189,19 +193,24 @@
                                 <option value="4x6">4×6 inches (10.2×15.2cm)</option>
                                 <option value="5x7">5×7 inches (12.7×17.8cm)</option>
                                 <option value="8x10">8×10 inches (20.3×25.4cm)</option>
+                                <option value="Letter">Letter (8.5×11in)</option>
+                                <option value="Legal">Legal (8.5×14in)</option>
+                                <option value="Executive">Executive (7.25×10.5in)</option>
+                                <option value="Tabloid">Tabloid (11×17in)</option>
                             </select>
                         </div>
                         <div>
                             <label class="block text-sm font-medium text-gray-700 mb-2">Paper Type</label>
                             <select id="paperType" class="w-full border border-gray-300 rounded-lg px-4 py-2">
+                                <option value="auto">Auto Select</option>
                                 <option value="plain" selected>Plain Paper</option>
                                 <option value="photo">Photo Paper</option>
                                 <option value="glossy">Glossy Photo Paper</option>
                                 <option value="matte">Matte Photo Paper</option>
+                                <option value="transparency">Transparency Film</option>
                                 <option value="envelope">Envelope</option>
                                 <option value="cardstock">Cardstock</option>
                                 <option value="labels">Labels</option>
-                                <option value="auto">Auto Select</option>
                             </select>
                         </div>
                     </div>
@@ -326,25 +335,13 @@
                                pattern="^(\d+(-\d+)?)(\s+\d+(-\d+)?)*$"
                                class="w-full border border-gray-300 rounded-lg px-4 py-2 focus:border-green-500 focus:ring-1 focus:ring-green-500"
                                oninput="validatePageRange(this.value)">
-                        <p class="text-xs text-gray-500 mt-1">Supported format: 1-5 8 10-12 (space-separated, commas not supported)</p>
+                        <p class="text-xs text-gray-500 mt-1">Supported format: 1-5 8 10-12 (space-separated, commas not supported; page numbers start at 1, and the start cannot exceed the end)</p>
                     </div>
 
                     <button id="printBtn" disabled class="w-full bg-blue-500 hover:bg-blue-600 disabled:bg-gray-400 text-white font-semibold py-3 rounded-lg">
                         🖨️ Submit Print
                     </button>
 
-                    <!-- 打印参数详情 -->
-                    <div id="printParamsSection" class="mt-4 hidden">
-                        <h3 class="text-lg font-semibold text-gray-800 mb-3 flex items-center">
-                            <svg class="w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"/>
-                            </svg>
-                            Print Parameters Details
-                        </h3>
-                        <div id="printParamsContent" class="bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm">
-                            <!-- 参数内容将通过JavaScript动态填充 -->
-                        </div>
-                    </div>
                 </div>
 
             </div>
@@ -431,6 +428,14 @@
         const UPLOAD_LIMIT = {{ max_upload_size }};
         const ALLOWED_EXTENSIONS = {{ allowed_extensions | tojson }};
 
+        // Send the UI language with every API request so the backend can localize messages
+        const UI_LANG = document.documentElement.lang.toLowerCase().startsWith('en') ? 'en' : 'zh';
+        function apiFetch(url, options = {}) {
+            const headers = new Headers(options.headers || {});
+            headers.set('X-Lang', UI_LANG);
+            return window.fetch(url, { ...options, headers });
+        }
+
         // HTML escaping helper to prevent XSS (all external data must pass through this)
         function escapeHtml(value) {
             if (value === null || value === undefined) return '';
@@ -443,6 +448,7 @@
         }
         let uploadedFile = null;
         let currentUploadXhr = null;
+        let currentUploadToken = null;
         let jobs = [];
         let jobsTimerId = null;
         let filesTimerId = null;
@@ -457,7 +463,7 @@
             const pollTimer = setInterval(async () => {
                 pollCount++;
                 try {
-                    const resp = await fetch('/api/update-check');
+                    const resp = await apiFetch('/api/update-check');
                     const data = await resp.json();
                     if (data.status === 'checking') {
                         if (pollCount >= UPDATE_POLL_MAX) {
@@ -515,7 +521,20 @@
 
             // 验证格式：1, 1-5, 1-5 8, 1-5 8 10-12（空格分隔）
             const pattern = /^(\d+(-\d+)?)(\s+\d+(-\d+)?)*$/;
-            const isValid = pattern.test(value);
+            let isValid = pattern.test(value);
+            let errorText = 'Invalid format';
+
+            // Page numbers start at 1, and the start of a range cannot exceed its end
+            if (isValid) {
+                for (const token of value.split(/\s+/)) {
+                    const parts = token.split('-').map(Number);
+                    if (parts[0] < 1 || (parts.length > 1 && parts[1] < parts[0])) {
+                        isValid = false;
+                        errorText = 'Page numbers start at 1, and the start cannot exceed the end';
+                        break;
+                    }
+                }
+            }
 
             if (errorSpan) {
                 if (isValid) {
@@ -526,7 +545,7 @@
                         input.classList.add('border-green-500');
                     }
                 } else {
-                    errorSpan.textContent = 'Invalid format';
+                    errorSpan.textContent = errorText;
                     errorSpan.classList.remove('hidden');
                     if (input) {
                         input.classList.remove('border-gray-300', 'border-green-500');
@@ -622,6 +641,9 @@
             if (removeFileBtn) {
                 removeFileBtn.addEventListener('click', (e) => {
                     e.stopPropagation();
+                    previewGeneration++;
+                    stopPreviewCheck();
+                    clearOpenPreviewLink();
                     uploadedFile = null;
                     if (fileInput) fileInput.value = '';
                     if (uploadState) uploadState.classList.remove('hidden');
@@ -665,14 +687,14 @@
                         console.error('定时加载打印机信息失败:', e);
                     }
                 }, 11000);
-                console.log('打印机信息定时器已重置');
             }
 
             // 打印机选择变化
             const printerSelect = document.getElementById('printerSelect');
             if (printerSelect) {
                 printerSelect.addEventListener('change', () => {
-                    // 切换打印机时更新所有信息
+                    // 切换打印机时先清空旧数据，避免显示上一台打印机的信息
+                    setPrinterPanelsState('loading');
                     updatePrinterInfoDisplay();
                     // 重置定时器，避免短时间内重复请求
                     resetPrinterInfoTimer();
@@ -689,9 +711,7 @@
 
                 // 延迟加载打印机信息，确保打印机已选择
                 setTimeout(async () => {
-                    console.log('开始加载打印机信息...');
                     await updatePrinterInfoDisplay();
-                    console.log('打印机信息加载完成');
                     // 启动定时器
                     resetPrinterInfoTimer();
                 }, 1000);
@@ -719,7 +739,7 @@
                 clearInterval(jobsTimerId);
                 clearInterval(filesTimerId);
                 clearInterval(printerInfoTimerId);
-                if (previewCheckInterval) clearInterval(previewCheckInterval);
+                stopPreviewCheck();
             });
 
             // 定时刷新打印机信息（队列、墨盒、纸盒、打印机信息）- 每 11 秒
@@ -738,14 +758,35 @@
             if (currentUploadXhr) {
                 currentUploadXhr.abort();
                 currentUploadXhr = null;
+                // Also tell the server to cancel: aborting only the client request
+                // may leave an orphaned file and token if the server already finished.
+                if (currentUploadToken) {
+                    apiFetch('/api/upload-cancel/' + currentUploadToken, { method: 'DELETE' }).catch(function() {});
+                    currentUploadToken = null;
+                }
             }
+            previewGeneration++;
+            stopPreviewCheck();
+
+            // Selecting a new file immediately invalidates the previous selection:
+            // even if validation fails, the upload is in progress or it fails,
+            // the print button will never point to the previous file again.
+            uploadedFile = null;
+            currentPreviewImages = [];
+            updatePrintButton();
+            const stalePreviewContent = document.getElementById('previewContent');
+            const stalePreviewState = document.getElementById('previewState');
+            if (stalePreviewContent) stalePreviewContent.innerHTML = '';
+            if (stalePreviewState) stalePreviewState.classList.add('hidden');
 
             const ext = file.name.split('.').pop().toLowerCase();
             if (!ALLOWED_EXTENSIONS.includes(ext)) {
+                resetUploadUI();
                 showToast(`Unsupported format .${ext}, supported: ${ALLOWED_EXTENSIONS.join(', ')}`, 'error');
                 return;
             }
             if (file.size > UPLOAD_LIMIT) {
+                resetUploadUI();
                 showToast(`File too large (limit ${UPLOAD_LIMIT / 1024 / 1024}MB), current ${(file.size / 1024 / 1024).toFixed(1)}MB`, 'error');
                 return;
             }
@@ -754,10 +795,7 @@
             const uploadToken = 'up_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
             formData.append('file', file);
             formData.append('upload_token', uploadToken);
-
-            currentPreviewImages = [];
-            const previewContent = document.getElementById('previewContent');
-            if (previewContent) previewContent.innerHTML = '';
+            currentUploadToken = uploadToken;
 
             const uploadState = document.getElementById('uploadState');
             const previewState = document.getElementById('previewState');
@@ -779,7 +817,8 @@
                     currentUploadXhr.abort();
                     currentUploadXhr = null;
                 }
-                fetch('/api/upload-cancel/' + uploadToken, {method: 'DELETE'}).catch(function() {});
+                currentUploadToken = null;
+                apiFetch('/api/upload-cancel/' + uploadToken, {method: 'DELETE'}).catch(function() {});
                 resetUploadUI();
                 showToast('Upload cancelled', 'info');
             };
@@ -806,6 +845,7 @@
 
                     xhr.onload = function() {
                         currentUploadXhr = null;
+                        currentUploadToken = null;
                         try {
                             if (xhr.status >= 200 && xhr.status < 300) {
                                 resolve(JSON.parse(xhr.responseText));
@@ -824,6 +864,7 @@
 
                     xhr.onerror = function() {
                         currentUploadXhr = null;
+                        currentUploadToken = null;
                         reject(new Error('Network error'));
                     };
 
@@ -833,11 +874,13 @@
 
                     xhr.ontimeout = function() {
                         currentUploadXhr = null;
+                        currentUploadToken = null;
                         reject(new Error('Upload timeout, please check network connection or file size'));
                     };
 
                     try {
                         xhr.open('POST', '/api/upload');
+                        xhr.setRequestHeader('X-Lang', UI_LANG);
                         xhr.send(formData);
                     } catch (e) {
                         reject(e);
@@ -847,7 +890,6 @@
                 if (data.success) {
                     uploadedFile = data;
                     document.getElementById('previewFileName').textContent = data.filename;
-                    document.getElementById('previewFileSize').textContent = formatFileSize(file.size);
 
                     const uploadProgress = document.getElementById('uploadProgress');
                     const previewState = document.getElementById('previewState');
@@ -875,19 +917,40 @@
 
         // 存储当前文件的预览图片信息
         let currentPreviewImages = [];
-        let previewCheckInterval = null;
+        let previewLoadTimeout = null;
+        let previewGeneration = 0;
+        // Current preview file and PDF availability (used for switching back to PDF and syncing the header link)
+        let currentPreviewFile = '';
+        let previewPdfAvailable = false;
 
-        // 停止预览轮询定时器（PDF 加载成功 / 失败切图片 / 页面切换时调用）
+        // 停止预览超时兜底（PDF 加载成功 / 失败切图片 / 页面切换时调用）
+        // 避免旧预览的异步回调作用到新文件上
         function stopPreviewCheck() {
-            if (previewCheckInterval) {
-                clearInterval(previewCheckInterval);
-                previewCheckInterval = null;
+            if (previewLoadTimeout) {
+                clearTimeout(previewLoadTimeout);
+                previewLoadTimeout = null;
             }
         }
 
-        async function loadPreview(filename, previewImages = null) {
+        // Clear the header "Open in new tab" link so it never points to the previous file
+        function clearOpenPreviewLink() {
+            const link = document.getElementById('openPreviewInNewTab');
+            if (link) {
+                link.classList.add('hidden');
+                link.removeAttribute('href');
+            }
+        }
+
+        async function loadPreview(filename, previewImages = null, manualPdf = false) {
             const previewContent = document.getElementById('previewContent');
             if (!previewContent) return;
+
+            // 每次加载生成新代次，异步回调执行前校验，防止旧预览覆盖新文件
+            const generation = ++previewGeneration;
+            stopPreviewCheck();
+            clearOpenPreviewLink();
+            currentPreviewFile = filename;
+            previewPdfAvailable = false;
 
             const ext = filename.split('.').pop().toLowerCase();
 
@@ -903,6 +966,68 @@
             if (ALLOWED_EXTENSIONS.includes(ext)) {
                 // PDF 和文档类型：优先尝试 PDF 内嵌显示，失败则降级为图片预览
                 const previewUrl = `/api/preview/${encodeURIComponent(filename)}`;
+
+                // 先确认预览文件可用，避免 <object> 加载 404 时只显示空白
+                let previewAvailable = false;
+                try {
+                    const headResponse = await apiFetch(previewUrl, { method: 'HEAD' });
+                    const previewType = (headResponse.headers.get('content-type') || '').toLowerCase();
+                    // Require an actual PDF response, not just a 2xx status
+                    previewAvailable = headResponse.ok && previewType.includes('application/pdf');
+                } catch (error) {
+                    console.error('检查预览文件失败:', error);
+                }
+
+                // 期间用户已选择其他文件，丢弃本次结果
+                if (generation !== previewGeneration) return;
+
+                if (previewAvailable) {
+                    previewPdfAvailable = true;
+                    const openLink = document.getElementById('openPreviewInNewTab');
+                    if (openLink) {
+                        openLink.href = previewUrl;
+                        openLink.classList.remove('hidden');
+                    }
+                }
+
+                // Browsers that explicitly cannot render PDFs inline (e.g. Android Chrome): use images
+                if (previewAvailable && navigator.pdfViewerEnabled === false) {
+                    if (currentPreviewImages.length > 0) {
+                        loadFallbackImages();
+                        return;
+                    }
+                    previewContent.innerHTML = `
+                        <div class="flex flex-col items-center justify-center h-full bg-gray-50 text-center px-4">
+                            <p class="mb-2 text-gray-700 font-medium">Inline preview is not supported in this browser</p>
+                            <p class="mb-4 text-sm text-gray-500">Use “Open in new tab” above to view the PDF</p>
+                        </div>
+                    `;
+                    return;
+                }
+
+                const fallbackButtons = currentPreviewImages.length > 0 ? `
+                    <button onclick="loadFallbackImages()" class="inline-flex items-center gap-2 bg-gray-500 hover:bg-gray-600 text-white px-4 py-2 rounded-lg transition">
+                        <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+                        </svg>
+                        Show image preview
+                    </button>
+                ` : '';
+
+                if (!previewAvailable) {
+                    // Preview PDF is unavailable but images exist: show them directly
+                    if (currentPreviewImages.length > 0) {
+                        loadFallbackImages();
+                        return;
+                    }
+                    previewContent.innerHTML = `
+                        <div class="flex flex-col items-center justify-center h-full bg-gray-50 text-center px-4">
+                            <p class="mb-2 text-gray-700 font-medium">Preview file unavailable</p>
+                            <p class="mb-4 text-sm text-gray-500">The preview may not have been generated yet, or the original file was deleted</p>
+                        </div>
+                    `;
+                    return;
+                }
 
                 previewContent.innerHTML = `
                     <div id="loadingIndicator" class="absolute inset-0 flex items-center justify-center bg-gray-50 z-10">
@@ -927,85 +1052,72 @@
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
                             </svg>
                             <p class="mb-2 text-gray-700 font-medium">Your browser does not support embedded PDF preview</p>
-                            <p class="mb-4 text-sm text-gray-500">Please choose one of the following options</p>
-                            <div class="flex flex-wrap gap-3 justify-center">
-                                <a href="${previewUrl}" target="_blank" class="inline-flex items-center gap-2 bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg transition">
-                                    <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
-                                    </svg>
-                                    Open in new tab
-                                </a>
-                                <button onclick="loadFallbackImages()" class="inline-flex items-center gap-2 bg-gray-500 hover:bg-gray-600 text-white px-4 py-2 rounded-lg transition">
-                                    <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
-                                    </svg>
-                                    Show image preview
-                                </button>
-                            </div>
+                            <p class="mb-4 text-sm text-gray-500">Use “Open in new tab” above, or switch to image preview</p>
                         </div>
                     </object>
+                    ${fallbackButtons ? `<div class="flex flex-wrap gap-3 justify-center p-3 border-t border-gray-200 bg-white">${fallbackButtons}</div>` : ''}
                 `;
 
-                // 延迟检测加载状态（组合方案）
-                setTimeout(() => {
-                    const pdfObject = document.getElementById('pdfObject');
-                    const loadingIndicator = document.getElementById('loadingIndicator');
+                const pdfObject = document.getElementById('pdfObject');
+                const loadingIndicator = document.getElementById('loadingIndicator');
+                const skipButton = document.getElementById('skipPdfLoad');
 
-                    if (!pdfObject || !loadingIndicator) return;
+                const hideLoading = () => {
+                    if (loadingIndicator) loadingIndicator.classList.add('hidden');
+                };
 
-                    let pdfLoaded = false;
+                let pdfLoaded = false;
 
-                    // 方案 1: 监听 error 事件（自动切换图片预览）
-                    pdfObject.addEventListener('error', () => {
-                        if (!pdfLoaded) {
-                            console.log('PDF 加载失败，自动切换图片预览');
-                            loadFallbackImages();
-                        }
-                    });
-
-                    // 方案 2: 监听 load 事件（成功检测）
+                if (pdfObject) {
                     pdfObject.addEventListener('load', () => {
+                        if (generation !== previewGeneration) return;
                         pdfLoaded = true;
-                        loadingIndicator.classList.add('hidden');
+                        hideLoading();
                         stopPreviewCheck();
-                        console.log('PDF 加载成功');
                     });
 
-                    // 方案 3: 尺寸检测（兜底）
-                    stopPreviewCheck();
-                    let previewCheckTicks = 0;
-                    previewCheckInterval = setInterval(() => {
-                        try {
-                            if (++previewCheckTicks > 24) {
-                                stopPreviewCheck();
-                                return;
+                    pdfObject.addEventListener('error', () => {
+                        if (generation !== previewGeneration) return;
+                        if (!pdfLoaded) {
+                            hideLoading();
+                            if (manualPdf) {
+                                // Manual switch back to PDF: don't auto-fallback, otherwise the button would bounce back to images
+                                showToast('PDF preview could not be displayed. Open it in a new tab or switch back to image preview', 'error');
+                            } else {
+                                loadFallbackImages();
                             }
-                            const width = pdfObject.clientWidth;
-                            const height = pdfObject.clientHeight;
-
-                            if (width > 0 && height > 0 && width > 50 && height > 50) {
-                                pdfLoaded = true;
-                                stopPreviewCheck();
-                                loadingIndicator.classList.add('hidden');
-                                console.log('PDF 加载成功（尺寸检测）');
-                            }
-                        } catch (e) {
-                            console.error('检查 PDF 加载状态出错:', e);
                         }
-                    }, 500);
+                    });
+                }
 
-                    // 方案 4: 跳过按钮事件监听（用户主动选择）
-                    const skipButton = document.getElementById('skipPdfLoad');
-                    if (skipButton) {
-                        skipButton.addEventListener('click', () => {
-                            console.log('用户手动跳过 PDF 加载');
+                if (skipButton) {
+                    skipButton.addEventListener('click', () => {
+                        if (generation !== previewGeneration) return;
+                        loadFallbackImages();
+                    });
+                }
+
+                // 兜底：部分浏览器不会触发 <object> 的 load/error 事件
+                // 超时仍未加载且有预览图片时，自动切换为图片预览
+                previewLoadTimeout = setTimeout(() => {
+                    if (generation !== previewGeneration) return;
+                    if (!pdfLoaded) {
+                        hideLoading();
+                        if (currentPreviewImages.length > 0 && !manualPdf) {
+                            showToast('PDF preview timed out; showing image preview instead', 'info');
                             loadFallbackImages();
-                        });
+                        }
                     }
-                }, 300);
+                }, 5000);
             } else {
                 previewContent.innerHTML = `<div class="flex items-center justify-center h-full text-gray-500">Preview not supported for this file format</div>`;
             }
+        }
+
+        // Switch back to PDF preview from image mode (manual switch, no auto-fallback on failure)
+        function showPdfPreview() {
+            if (!currentPreviewFile || !previewPdfAvailable) return;
+            loadPreview(currentPreviewFile, currentPreviewImages, true);
         }
 
         // 降级为图片预览（当 PDF 加载失败或用户手动跳过时）
@@ -1017,10 +1129,18 @@
             // 如果有预览图片，显示图片预览
             // 注意：currentPreviewImages 可能为空（上传时转换失败），此时显示提示信息
             if (currentPreviewImages && currentPreviewImages.length > 0) {
-                console.log(`使用图片预览，共 ${currentPreviewImages.length} 页`);
+                const firstImageUrl = `/api/preview/${encodeURIComponent(currentPreviewImages[0].filename)}`;
+                // Image mode: the header link opens the current image, matching what is shown
+                const openLink = document.getElementById('openPreviewInNewTab');
+                if (openLink) {
+                    openLink.href = firstImageUrl;
+                    openLink.classList.remove('hidden');
+                }
 
-                let imagesHtml = '<div class="image-preview-container h-full bg-gray-50 relative">';
-                imagesHtml += '<div class="h-full overflow-y-auto pb-12">';
+                const canShowPdf = previewPdfAvailable && navigator.pdfViewerEnabled !== false;
+
+                let imagesHtml = '<div class="image-preview-container h-full bg-gray-50 relative flex flex-col">';
+                imagesHtml += '<div class="flex-1 min-h-0 overflow-y-auto pb-12">';
                 imagesHtml += '<div class="flex flex-col items-center gap-2 p-4 pb-4">';
 
                 currentPreviewImages.forEach((img) => {
@@ -1032,11 +1152,25 @@
                 imagesHtml += '</div>';
 
                 if (currentPreviewImages.length > 1) {
+                    // Lift the page badge when the bottom button bar is present
                     imagesHtml += `
-                        <div class="absolute bottom-3 left-1/2 -translate-x-1/2 pointer-events-none z-10">
+                        <div class="absolute ${canShowPdf ? 'bottom-20' : 'bottom-3'} left-1/2 -translate-x-1/2 pointer-events-none z-10">
                             <span class="inline-block bg-black/70 text-white px-4 py-1.5 rounded-full text-sm whitespace-nowrap">
                                 Total ${currentPreviewImages.length} pages
                             </span>
+                        </div>
+                    `;
+                }
+
+                if (canShowPdf) {
+                    imagesHtml += `
+                        <div class="flex flex-wrap gap-3 justify-center p-3 border-t border-gray-200 bg-white shrink-0">
+                            <button onclick="showPdfPreview()" class="inline-flex items-center gap-2 bg-gray-500 hover:bg-gray-600 text-white px-4 py-2 rounded-lg transition">
+                                <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                                </svg>
+                                Show PDF preview
+                            </button>
                         </div>
                     `;
                 }
@@ -1093,7 +1227,7 @@
             // 验证页面范围格式
             if (pageRange && pageRange.value.trim() !== '') {
                 if (!validatePageRange(pageRange.value.trim())) {
-                    showToast('Invalid page range format, please use spaces (e.g., 1-5 8 10-12)', 'error');
+                    showToast('Invalid page range: use spaces (e.g., 1-5 8 10-12); page numbers start at 1 and the start cannot exceed the end', 'error');
                     return;
                 }
             }
@@ -1102,7 +1236,7 @@
             btn.textContent = 'Submitting...';
 
             try {
-                const response = await fetch('/api/print', {
+                const response = await apiFetch('/api/print', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -1124,10 +1258,6 @@
 
                 if (data.success) {
                     showToast('Print job submitted successfully', 'success');
-                    // 显示打印参数详情
-                    if (data.job) {
-                        showPrintParams(data.job);
-                    }
                     loadJobs();
                     resetForm();
                 } else {
@@ -1138,14 +1268,17 @@
                 showToast('Submission failed: ' + error.message, 'error');
             } finally {
                 if (btn) {
-                    btn.disabled = false;
                     btn.textContent = '🖨️ Submit Print';
+                    updatePrintButton();
                 }
             }
         }
 
         function resetForm() {
             uploadedFile = null;
+            previewGeneration++;
+            stopPreviewCheck();
+            clearOpenPreviewLink();
             const fileInput = document.getElementById('fileInput');
             const uploadState = document.getElementById('uploadState');
             const previewState = document.getElementById('previewState');
@@ -1157,104 +1290,18 @@
             if (previewContent) previewContent.innerHTML = '';
 
             updatePrintButton();
-
-            // 隐藏打印参数详情
-            const printParamsSection = document.getElementById('printParamsSection');
-            if (printParamsSection) {
-                printParamsSection.classList.add('hidden');
-            }
-        }
-
-        function showPrintParams(job) {
-            const section = document.getElementById('printParamsSection');
-            const content = document.getElementById('printParamsContent');
-            
-            if (!section || !content) return;
-
-            section.classList.remove('hidden');
-            
-            const html = `
-                <div class="space-y-2">
-                    <div class="flex justify-between">
-                        <span class="text-gray-600">File name:</span>
-                        <span class="font-medium text-gray-800">${escapeHtml(job.filename)}</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-gray-600">Printer:</span>
-                        <span class="text-gray-800">${escapeHtml(job.printer)}</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-gray-600">Color mode:</span>
-                        <span class="text-gray-800">${escapeHtml(getColorModeText(job.color_mode))}</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-gray-600">Duplex:</span>
-                        <span class="text-gray-800">${escapeHtml(getDuplexText(job.duplex))}</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-gray-600">Orientation:</span>
-                        <span class="text-gray-800">${escapeHtml(getOrientationText(job.orientation))}</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-gray-600">Paper size:</span>
-                        <span class="text-gray-800">${escapeHtml(getPaperSizeText(job.paper_size))}</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-gray-600">Paper type:</span>
-                        <span class="text-gray-800">${escapeHtml(getPaperTypeText(job.paper_type))}</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-gray-600">Copies:</span>
-                        <span class="text-gray-800">${job.copies}</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-gray-600">Mirror print:</span>
-                        <span class="text-gray-800">${job.mirror ? 'Yes' : 'No'}</span>
-                    </div>
-                    <div class="flex justify-between">
-                        <span class="text-gray-600">Print scaling:</span>
-                        <span class="text-gray-800">${escapeHtml(getPrintScalingText(job.print_scaling))}</span>
-                    </div>
-                    ${job.page_range ? `
-                    <div class="flex justify-between">
-                        <span class="text-gray-600">Page range:</span>
-                        <span class="text-gray-800">${escapeHtml(job.page_range)}</span>
-                    </div>
-                    ` : ''}
-                    <div class="flex justify-between">
-                        <span class="text-gray-600">Job status:</span>
-                        <span class="px-2 py-1 rounded-full text-xs ${getStatusColor(job.status)}">${escapeHtml(getStatusText(job.status))}</span>
-                    </div>
-                    ${job.cups_job_id ? `
-                    <div class="flex justify-between">
-                        <span class="text-gray-600">CUPS job ID:</span>
-                        <span class="text-gray-800 font-mono text-xs">${escapeHtml(job.cups_job_id)}</span>
-                    </div>
-                    ` : ''}
-                    ${job.message ? `
-                    <div class="mt-2 pt-2 border-t border-blue-200">
-                        <span class="text-gray-600">Message:</span>
-                        <p class="text-gray-800 mt-1 text-sm">${escapeHtml(job.message)}</p>
-                    </div>
-                    ` : ''}
-                </div>
-            `;
-            
-            content.innerHTML = html;
         }
 
         async function loadPrinters() {
-            console.log('开始加载打印机列表...');
             try {
                 // 第一步：快速加载打印机列表（仅本地枚举，不做在线探测）
-                const response = await fetch('/api/printers');
+                const response = await apiFetch('/api/printers');
 
                 if (!response.ok) {
-                    throw new Error(`HTTP 错误：${response.status}`);
+                    throw new Error(`HTTP Error: ${response.status}`);
                 }
 
                 const data = await response.json();
-                console.log('打印机 API 响应:', data);
                 
                 const select = document.getElementById('printerSelect');
                 if (!select) {
@@ -1275,19 +1322,16 @@
 
                     // 自动选择第一台打印机
                     select.selectedIndex = 0;
-                    console.log(`成功加载 ${data.printers.length} 台打印机，开始并发探测状态...`);
 
                     // 第二步：并发请求每台打印机的在线状态，独立更新（不等待其他打印机）
                     data.printers.forEach((printer, index) => {
                         // 为每台打印机发起独立的异步请求
                         (async () => {
                             try {
-                                console.log(`正在探测打印机：${printer.name}`);
-                                const statusResp = await fetch(`/api/printer/${encodeURIComponent(printer.name)}/status`);
+                                const statusResp = await apiFetch(`/api/printer/${encodeURIComponent(printer.name)}/status`);
                                 let result;
                                 if (statusResp.ok) {
                                     result = await statusResp.json();
-                                    console.log(`打印机 ${printer.name} 状态响应:`, result);
                                 } else {
                                     console.warn(`打印机 ${printer.name} 状态 HTTP 错误：${statusResp.status}`);
                                     result = { name: printer.name, online_status: 'unknown', status: 'Unknown' };
@@ -1296,14 +1340,14 @@
                                 // 立即更新这一台打印机的显示
                                 const option = select.options[index];
                                 if (option) {
-                                    let statusDisplay = result.status || 'Unknown';
+                                    const statusLabels = { idle: 'Idle', printing: 'Printing', disabled: 'Disabled' };
+                                    let statusDisplay = statusLabels[result.status] || 'Unknown';
                                     if (result.online_status === 'online') {
                                         statusDisplay = 'Online';
                                     } else if (result.online_status === 'offline') {
                                         statusDisplay = 'Offline';
                                     }
                                     option.textContent = `${result.name} (${statusDisplay})`;
-                                    console.log(`打印机 ${result.name} 状态更新：${statusDisplay}`);
                                 }
                             } catch (e) {
                                 // 失败也立即更新为未知
@@ -1316,7 +1360,6 @@
                         })();
                     });
 
-                    console.log(`已发起 ${data.printers.length} 台打印机的状态探测（异步独立更新）`);
 
                     // 更新打印机信息显示
                     updatePrinterInfoDisplay();
@@ -1325,7 +1368,6 @@
                     option.value = '';
                     option.textContent = 'No printers detected';
                     select.appendChild(option);
-                    console.log('未检测到可用打印机');
                 }
                 updatePrintButton();
             } catch (error) {
@@ -1341,7 +1383,6 @@
                 }
                 showToast('Failed to load printer list, please check network connection', 'error');
             }
-            console.log('打印机列表加载完成');
         }
 
         function renderQueueHtml(queue, status) {
@@ -1369,7 +1410,7 @@
                                     <span class="font-medium">Job #${escapeHtml(job.job_id)}</span>
                                     <span class="text-gray-500">${formatFileSize(parseInt(job.size))}</span>
                                 </div>
-                                <div class="text-gray-600 truncate">${escapeHtml(job.filename)}</div>
+                                <div class="text-gray-600 truncate" title="${escapeHtml(job.filename)}">${escapeHtml(job.submitted || job.filename)}</div>
                             </div>
                         `).join('')}
                     </div>
@@ -1403,6 +1444,21 @@
         // 使用全局变量存储时间戳（避免闭包作用域问题）
         window.lastPrinterInfoRequestTimestamp = 0;
 
+        // 切换打印机时先占位，避免把上一台打印机的数据误认为当前打印机
+        function setPrinterPanelsState(state) {
+            const loading = state === 'loading';
+            const message = loading
+                ? 'Loading...'
+                : 'Failed to load, <button onclick="updatePrinterInfoDisplay()" class="text-blue-500 underline">retry</button>';
+            const colorClass = loading ? 'text-gray-500' : 'text-red-500';
+            ['printerQueueInfo', 'printerTrayInfo', 'printerInkInfo', 'printerInfo'].forEach((id) => {
+                const el = document.getElementById(id);
+                if (el) {
+                    el.innerHTML = `<div class="text-sm ${colorClass} text-center py-2">${message}</div>`;
+                }
+            });
+        }
+
         async function updatePrinterInfoDisplay() {
             const printerSelect = document.getElementById('printerSelect');
             if (!printerSelect) {
@@ -1412,11 +1468,9 @@
 
             const selectedPrinter = printerSelect.value;
             if (!selectedPrinter) {
-                console.log('updatePrinterInfoDisplay: 未选择打印机');
                 return;
             }
 
-            console.log(`updatePrinterInfoDisplay: 开始加载打印机 [${selectedPrinter}] 信息...`);
 
             // 记录当前请求时间戳
             const requestTimestamp = Date.now();
@@ -1424,19 +1478,16 @@
 
             try {
                 // 只获取当前选中打印机的详细信息
-                console.log(`updatePrinterInfoDisplay: 请求 /api/printer/${encodeURIComponent(selectedPrinter)}`);
-                const response = await fetch(`/api/printer/${encodeURIComponent(selectedPrinter)}`);
+                const response = await apiFetch(`/api/printer/${encodeURIComponent(selectedPrinter)}`);
                 
                 if (!response.ok) {
                     throw new Error(`HTTP ${response.status}`);
                 }
                 
                 const printer = await response.json();
-                console.log(`updatePrinterInfoDisplay: 收到打印机数据:`, printer);
 
                 // 检查是否有更新的请求，如果有则跳过渲染（避免旧请求覆盖新数据）
                 if (window.lastPrinterInfoRequestTimestamp !== requestTimestamp) {
-                    console.log('检测到更新的请求，跳过旧数据渲染');
                     return;
                 }
 
@@ -1453,8 +1504,8 @@
                 if (printerTrayInfo && printer) {
                     const trays = printer.trays || [];
                     if (trays && trays.length > 0) {
-                    const traysHtml = trays.map(tray => {
-                        let name = tray.name || tray.tray_name || 'Unknown';
+                    const traysHtml = trays.map((tray, index) => {
+                        let name = tray.name || tray.tray_name || `Tray ${index + 1}`;
                         let type = tray.type || tray.paper_type || 'Unknown';
                         let status = tray.status_en || tray.status_cn || tray.status || 'Unknown';
                         let mediaReady = tray.media_ready || tray.paper_size || 'Unknown';
@@ -1842,14 +1893,17 @@
         } catch (error) {
             console.error('加载打印机信息失败:', error);
             console.error('错误堆栈:', error.stack);
+            const printerSelect = document.getElementById('printerSelect');
+            if (printerSelect && printerSelect.value === selectedPrinter) {
+                setPrinterPanelsState('error');
+            }
         }
         }
 
 
         async function loadFiles() {
-            console.log('加载文件列表');
             try {
-                const response = await fetch('/api/files');
+                const response = await apiFetch('/api/files');
                 const data = await response.json();
                 const container = document.getElementById('filesList');
                 if (!container) return;
@@ -1878,13 +1932,12 @@
 
         async function selectFile(filename) {
             try {
-                const response = await fetch('/api/files');
+                const response = await apiFetch('/api/files');
                 const data = await response.json();
                 const file = data.files.find(f => f.filename === filename);
                 if (file) {
                     uploadedFile = { filename: file.filename };
                     document.getElementById('previewFileName').textContent = file.filename;
-                    document.getElementById('previewFileSize').textContent = 'Uploaded file';
                     
                     const uploadState = document.getElementById('uploadState');
                     const previewState = document.getElementById('previewState');
@@ -1915,13 +1968,17 @@
             }
 
             try {
-                const response = await fetch(`/api/files/${encodeURIComponent(filename)}`, {
+                const response = await apiFetch(`/api/files/${encodeURIComponent(filename)}`, {
                     method: 'DELETE'
                 });
                 const data = await response.json();
 
                 if (data.success) {
                     showToast('File deleted successfully', 'success');
+                    // 删除的是当前选中文件时，必须同步清空表单和预览，否则会打印已删除的文件
+                    if (uploadedFile && uploadedFile.filename === filename) {
+                        resetForm();
+                    }
                     loadFiles();
                 } else {
                     showToast('Deletion failed: ' + data.error, 'error');
@@ -1942,7 +1999,7 @@
             });
 
             try {
-                const response = await fetch('/api/jobs');
+                const response = await apiFetch('/api/jobs');
                 const data = await response.json();
                 jobs = data.jobs || [];
                 const container = document.getElementById('jobsList');
@@ -1979,7 +2036,7 @@
                             </div>
                         </div>
                         
-                        ${job.progress !== undefined && job.progress > 0 ? `
+                        ${job.progress !== undefined && job.progress > 0 && job.status !== 'sent' ? `
                         <div class="mb-2">
                             <div class="flex justify-between items-center mb-1">
                                 <span class="text-xs text-gray-500">Print progress</span>
@@ -2056,9 +2113,13 @@
                 'queued': 'bg-purple-100 text-purple-800',
                 'processing': 'bg-yellow-100 text-yellow-800',
                 'completed': 'bg-green-100 text-green-800',
+                'sent': 'bg-teal-100 text-teal-800',
                 'failed': 'bg-red-100 text-red-800',
                 'timeout': 'bg-orange-100 text-orange-800',
                 'cancelled': 'bg-gray-100 text-gray-800',
+                'held': 'bg-amber-100 text-amber-800',
+                'stopped': 'bg-red-100 text-red-800',
+                'error': 'bg-red-100 text-red-800',
                 'unknown': 'bg-gray-200 text-gray-800'
             };
             return colors[status] || 'bg-gray-100 text-gray-800';
@@ -2077,24 +2138,30 @@
                 'queued': 'Queued',
                 'processing': 'Processing',
                 'completed': 'Completed',
+                'sent': 'Sent',
                 'failed': 'Failed',
                 'timeout': '⏱️ Timeout',
                 'cancelled': 'Cancelled',
+                'held': 'On hold',
+                'stopped': 'Stopped',
+                'error': 'Error',
                 'unknown': 'Unknown'
             };
             return texts[status] || status;
         }
 
-        // 判断任务是否可以取消
+        // Whether the job can be cancelled
         function canCancelJob(status) {
-            // 只有已提交和处理中的任务可以取消
-            return status === 'submitted' || status === 'queued' || status === 'processing';
+            // Queued, processing, and held/stopped jobs can still be cancelled
+            return status === 'submitted' || status === 'queued' || status === 'processing'
+                || status === 'held' || status === 'stopped';
         }
 
-        // 判断任务是否可以删除
+        // Whether the job record can be deleted
         function canDeleteJob(status) {
-            // 已完成、失败、超时和状态未知的任务可以删除
-            return status === 'completed' || status === 'failed' || status === 'timeout' || status === 'unknown' || status === 'error';
+            // Finished (completed/sent/failed/timeout/unknown/error) jobs can be deleted
+            return status === 'completed' || status === 'sent' || status === 'failed'
+                || status === 'timeout' || status === 'unknown' || status === 'error';
         }
 
         // 取消任务
@@ -2117,7 +2184,7 @@
             }
 
             try {
-                const response = await fetch(`/api/jobs/${jobId}`, {
+                const response = await apiFetch(`/api/jobs/${jobId}`, {
                     method: 'DELETE'
                 });
 
@@ -2158,7 +2225,7 @@
             }
 
             try {
-                const response = await fetch(`/api/jobs/${jobId}`, {
+                const response = await apiFetch(`/api/jobs/${jobId}`, {
                     method: 'DELETE'
                 });
 
@@ -2204,6 +2271,7 @@
 
         function getPaperSizeText(size) {
             const texts = {
+                'auto': 'Printer Default / Auto',
                 'A4': 'A4 (210×297mm)',
                 'A3': 'A3 (297×420mm)',
                 'A2': 'A2 (420×594mm)',
@@ -2215,7 +2283,11 @@
                 '3.5x5': '3.5×5 inches (89×127mm)',
                 '4x6': '4×6 inches (102×152mm)',
                 '5x7': '5×7 inches (127×178mm)',
-                '8x10': '8×10 inches (203×254mm)'
+                '8x10': '8×10 inches (203×254mm)',
+                'Letter': 'Letter (216×279mm)',
+                'Legal': 'Legal (216×356mm)',
+                'Executive': 'Executive (184×267mm)',
+                'Tabloid': 'Tabloid (279×432mm)'
             };
             return texts[size] || size;
         }
@@ -2226,6 +2298,7 @@
                 'photo': 'Photo Paper',
                 'glossy': 'Glossy Photo Paper',
                 'matte': 'Matte Photo Paper',
+                'transparency': 'Transparency Film',
                 'envelope': 'Envelope',
                 'cardstock': 'Cardstock',
                 'labels': 'Labels',
