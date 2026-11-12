@@ -180,6 +180,7 @@
                         <div>
                             <label class="block text-sm font-medium text-gray-700 mb-2">纸张大小</label>
                             <select id="paperSize" class="w-full border border-gray-300 rounded-lg px-4 py-2">
+                                <option value="auto">打印机默认/自动</option>
                                 <option value="A4" selected>A4 (21.0×29.7cm)</option>
                                 <option value="A3">A3 (29.7×42.0cm)</option>
                                 <option value="A2">A2 (42.0×59.4cm)</option>
@@ -192,19 +193,24 @@
                                 <option value="4x6">4×6 英寸 (10.2×15.2cm)</option>
                                 <option value="5x7">5×7 英寸 (12.7×17.8cm)</option>
                                 <option value="8x10">8×10 英寸 (20.3×25.4cm)</option>
+                                <option value="Letter">Letter (8.5×11in)</option>
+                                <option value="Legal">Legal (8.5×14in)</option>
+                                <option value="Executive">Executive (7.25×10.5in)</option>
+                                <option value="Tabloid">Tabloid (11×17in)</option>
                             </select>
                         </div>
                         <div>
                             <label class="block text-sm font-medium text-gray-700 mb-2">纸张材质</label>
                             <select id="paperType" class="w-full border border-gray-300 rounded-lg px-4 py-2">
+                                <option value="auto">自动选择</option>
                                 <option value="plain" selected>普通纸</option>
                                 <option value="photo">照片纸</option>
                                 <option value="glossy">光面照片纸</option>
                                 <option value="matte">哑光照片纸</option>
+                                <option value="transparency">透明胶片</option>
                                 <option value="envelope">信封</option>
                                 <option value="cardstock">卡片纸</option>
                                 <option value="labels">标签纸</option>
-                                <option value="auto">自动选择</option>
                             </select>
                         </div>
                     </div>
@@ -329,7 +335,7 @@
                                pattern="^(\d+(-\d+)?)(\s+\d+(-\d+)?)*$"
                                class="w-full border border-gray-300 rounded-lg px-4 py-2 focus:border-green-500 focus:ring-1 focus:ring-green-500"
                                oninput="validatePageRange(this.value)">
-                        <p class="text-xs text-gray-500 mt-1">支持格式：1-5 8 10-12（空格分隔，不支持逗号）</p>
+                        <p class="text-xs text-gray-500 mt-1">支持格式：1-5 8 10-12（空格分隔，不支持逗号；页码从 1 开始，起始页不能大于结束页）</p>
                     </div>
 
                     <button id="printBtn" disabled class="w-full bg-blue-500 hover:bg-blue-600 disabled:bg-gray-400 text-white font-semibold py-3 rounded-lg">
@@ -519,7 +525,20 @@
 
             // 验证格式：1, 1-5, 1-5 8, 1-5 8 10-12（空格分隔）
             const pattern = /^(\d+(-\d+)?)(\s+\d+(-\d+)?)*$/;
-            const isValid = pattern.test(value);
+            let isValid = pattern.test(value);
+            let errorText = '格式无效';
+
+            // 页码需从 1 开始，且起始页不能大于结束页
+            if (isValid) {
+                for (const token of value.split(/\s+/)) {
+                    const parts = token.split('-').map(Number);
+                    if (parts[0] < 1 || (parts.length > 1 && parts[1] < parts[0])) {
+                        isValid = false;
+                        errorText = '页码需从 1 开始，且起始页不能大于结束页';
+                        break;
+                    }
+                }
+            }
 
             if (errorSpan) {
                 if (isValid) {
@@ -530,7 +549,7 @@
                         input.classList.add('border-green-500');
                     }
                 } else {
-                    errorSpan.textContent = '格式无效';
+                    errorSpan.textContent = errorText;
                     errorSpan.classList.remove('hidden');
                     if (input) {
                         input.classList.remove('border-gray-300', 'border-green-500');
@@ -1210,7 +1229,7 @@
             // 验证页面范围格式
             if (pageRange && pageRange.value.trim() !== '') {
                 if (!validatePageRange(pageRange.value.trim())) {
-                    showToast('页面范围格式无效，请使用空格分隔（如：1-5 8 10-12）', 'error');
+                    showToast('页面范围无效：请使用空格分隔（如 1-5 8 10-12），页码从 1 开始且起始页不能大于结束页', 'error');
                     return;
                 }
             }
@@ -2332,6 +2351,7 @@
 
         function getPaperSizeText(size) {
             const texts = {
+                'auto': '打印机默认/自动',
                 'A4': 'A4 (210×297mm)',
                 'A3': 'A3 (297×420mm)',
                 'A2': 'A2 (420×594mm)',
@@ -2343,7 +2363,11 @@
                 '3.5x5': '3.5×5 英寸 (89×127mm)',
                 '4x6': '4×6 英寸 (102×152mm)',
                 '5x7': '5×7 英寸 (127×178mm)',
-                '8x10': '8×10 英寸 (203×254mm)'
+                '8x10': '8×10 英寸 (203×254mm)',
+                'Letter': 'Letter (216×279mm)',
+                'Legal': 'Legal (216×356mm)',
+                'Executive': 'Executive (184×267mm)',
+                'Tabloid': 'Tabloid (279×432mm)'
             };
             return texts[size] || size;
         }
@@ -2354,6 +2378,7 @@
                 'photo': '照片纸',
                 'glossy': '光面照片纸',
                 'matte': '哑光照片纸',
+                'transparency': '透明胶片',
                 'envelope': '信封',
                 'cardstock': '卡片纸',
                 'labels': '标签纸',
