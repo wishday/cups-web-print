@@ -1079,7 +1079,7 @@ def get_printable_file(filepath, filename, page_range=None):
     return pdf_path, None, False
 
 
-def submit_print_job(filepath, printer_name, color_mode='mono', duplex='one-sided', orientation='portrait', paper_size='A4', paper_type='plain', copies=1, page_range=None, mirror=False, print_scaling='auto-fit'):
+def submit_print_job(filepath, printer_name, color_mode='mono', duplex='two-sided-long-edge', orientation='portrait', paper_size='A4', paper_type='plain', copies=1, page_range=None, mirror=False, print_scaling='auto-fit'):
     """
     提交打印任务到CUPS
 
@@ -1090,7 +1090,7 @@ def submit_print_job(filepath, printer_name, color_mode='mono', duplex='one-side
         duplex: one-sided/two-sided-long-edge/two-sided-short-edge
         orientation: portrait/landscape (打印方向)
         paper_size: 纸张大小 (auto, A4, A3, A2, A1, A5, A6, B4, B5, 3.5x5, 4x6, 5x7, 8x10, Letter, Legal, Executive, Tabloid)
-        paper_type: 纸张材质 (plain, photo, glossy, matte, envelope, cardstock, labels, auto)
+        paper_type: 纸张材质 (plain, photo, glossy, matte, transparency, envelope, cardstock, labels, auto)
         copies: 打印份数
         page_range: 页面范围，格式如 "1-5 8 10-12"（空格分隔，不支持逗号）
         mirror: 是否镜像打印
@@ -1164,6 +1164,7 @@ def submit_print_job(filepath, printer_name, color_mode='mono', duplex='one-side
             'photo': 'photographic',     # 照片纸
             'glossy': 'photographic-glossy',  # 光面照片纸
             'matte': 'photographic-matte',    # 哑光照片纸
+            'transparency': 'transparency',   # 透明胶片（幻灯片）
             'envelope': 'envelope',      # 信封
             'labels': 'labels',          # 标签纸
             'cardstock': 'cardstock',    # 卡片纸
@@ -2163,7 +2164,7 @@ def api_print():
     if printer_name is not None and not isinstance(printer_name, str):
         return jsonify({'error': 'printer 必须是字符串'}), 400
     color_mode = data.get('color_mode', 'mono')  # 默认改为mono（黑白）
-    duplex = data.get('duplex', 'one-sided')
+    duplex = data.get('duplex', 'two-sided-long-edge')
     orientation = data.get('orientation', 'portrait')
     paper_size = data.get('paper_size', 'A4')
     paper_type = data.get('paper_type', 'plain')
@@ -2232,7 +2233,7 @@ def api_print():
         return jsonify({'error': f'无效的纸张大小，支持的格式: {", ".join(valid_paper_sizes)}'}), 400
 
     # 验证纸张材质
-    valid_paper_types = ['plain', 'photo', 'glossy', 'matte', 'envelope', 'cardstock', 'labels', 'auto']
+    valid_paper_types = ['plain', 'photo', 'glossy', 'matte', 'transparency', 'envelope', 'cardstock', 'labels', 'auto']
     if paper_type not in valid_paper_types:
         return jsonify({'error': f'无效的纸张材质，支持的类型: {", ".join(valid_paper_types)}'}), 400
 

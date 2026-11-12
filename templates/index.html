@@ -207,6 +207,7 @@
                                 <option value="photo">照片纸</option>
                                 <option value="glossy">光面照片纸</option>
                                 <option value="matte">哑光照片纸</option>
+                                <option value="transparency">透明胶片</option>
                                 <option value="envelope">信封</option>
                                 <option value="cardstock">卡片纸</option>
                                 <option value="labels">标签纸</option>
@@ -240,14 +241,14 @@
                             <label class="block text-sm font-medium text-gray-700 mb-2">双面打印</label>
                             <div class="space-y-2">
                                 <label class="flex items-center p-2 border rounded-lg hover:bg-gray-50 cursor-pointer transition">
-                                    <input type="radio" name="duplex" value="one-sided" checked class="mr-3">
+                                    <input type="radio" name="duplex" value="one-sided" class="mr-3">
                                     <svg class="w-5 h-5 mr-2 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
                                     </svg>
                                     <span>单面</span>
                                 </label>
                                 <label class="flex items-center p-2 border rounded-lg hover:bg-gray-50 cursor-pointer transition">
-                                    <input type="radio" name="duplex" value="two-sided-long-edge" class="mr-3">
+                                    <input type="radio" name="duplex" value="two-sided-long-edge" checked class="mr-3">
                                     <svg class="w-5 h-5 mr-2 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" xmlns="http://www.w3.org/2000/svg">
                                         <!-- 长方形A4纸轮廓 -->
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 3h16v18H4z"/>
@@ -2377,6 +2378,7 @@
                 'photo': '照片纸',
                 'glossy': '光面照片纸',
                 'matte': '哑光照片纸',
+                'transparency': '透明胶片',
                 'envelope': '信封',
                 'cardstock': '卡片纸',
                 'labels': '标签纸',
