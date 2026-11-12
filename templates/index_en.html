@@ -440,6 +440,14 @@
         const UPLOAD_LIMIT = {{ max_upload_size }};
         const ALLOWED_EXTENSIONS = {{ allowed_extensions | tojson }};
 
+        // Send the UI language with every API request so the backend can localize messages
+        const UI_LANG = document.documentElement.lang.toLowerCase().startsWith('en') ? 'en' : 'zh';
+        function apiFetch(url, options = {}) {
+            const headers = new Headers(options.headers || {});
+            headers.set('X-Lang', UI_LANG);
+            return window.fetch(url, { ...options, headers });
+        }
+
         // HTML escaping helper to prevent XSS (all external data must pass through this)
         function escapeHtml(value) {
             if (value === null || value === undefined) return '';
@@ -467,7 +475,7 @@
             const pollTimer = setInterval(async () => {
                 pollCount++;
                 try {
-                    const resp = await fetch('/api/update-check');
+                    const resp = await apiFetch('/api/update-check');
                     const data = await resp.json();
                     if (data.status === 'checking') {
                         if (pollCount >= UPDATE_POLL_MAX) {
@@ -765,7 +773,7 @@
                 // Also tell the server to cancel: aborting only the client request
                 // may leave an orphaned file and token if the server already finished.
                 if (currentUploadToken) {
-                    fetch('/api/upload-cancel/' + currentUploadToken, { method: 'DELETE' }).catch(function() {});
+                    apiFetch('/api/upload-cancel/' + currentUploadToken, { method: 'DELETE' }).catch(function() {});
                     currentUploadToken = null;
                 }
             }
@@ -822,7 +830,7 @@
                     currentUploadXhr = null;
                 }
                 currentUploadToken = null;
-                fetch('/api/upload-cancel/' + uploadToken, {method: 'DELETE'}).catch(function() {});
+                apiFetch('/api/upload-cancel/' + uploadToken, {method: 'DELETE'}).catch(function() {});
                 resetUploadUI();
                 showToast('Upload cancelled', 'info');
             };
@@ -884,6 +892,7 @@
 
                     try {
                         xhr.open('POST', '/api/upload');
+                        xhr.setRequestHeader('X-Lang', UI_LANG);
                         xhr.send(formData);
                     } catch (e) {
                         reject(e);
@@ -973,7 +982,7 @@
                 // 先确认预览文件可用，避免 <object> 加载 404 时只显示空白
                 let previewAvailable = false;
                 try {
-                    const headResponse = await fetch(previewUrl, { method: 'HEAD' });
+                    const headResponse = await apiFetch(previewUrl, { method: 'HEAD' });
                     const previewType = (headResponse.headers.get('content-type') || '').toLowerCase();
                     // Require an actual PDF response, not just a 2xx status
                     previewAvailable = headResponse.ok && previewType.includes('application/pdf');
@@ -1239,7 +1248,7 @@
             btn.textContent = 'Submitting...';
 
             try {
-                const response = await fetch('/api/print', {
+                const response = await apiFetch('/api/print', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -1386,10 +1395,10 @@
         async function loadPrinters() {
             try {
                 // 第一步：快速加载打印机列表（仅本地枚举，不做在线探测）
-                const response = await fetch('/api/printers');
+                const response = await apiFetch('/api/printers');
 
                 if (!response.ok) {
-                    throw new Error(`HTTP 错误：${response.status}`);
+                    throw new Error(`HTTP Error: ${response.status}`);
                 }
 
                 const data = await response.json();
@@ -1419,7 +1428,7 @@
                         // 为每台打印机发起独立的异步请求
                         (async () => {
                             try {
-                                const statusResp = await fetch(`/api/printer/${encodeURIComponent(printer.name)}/status`);
+                                const statusResp = await apiFetch(`/api/printer/${encodeURIComponent(printer.name)}/status`);
                                 let result;
                                 if (statusResp.ok) {
                                     result = await statusResp.json();
@@ -1569,7 +1578,7 @@
 
             try {
                 // 只获取当前选中打印机的详细信息
-                const response = await fetch(`/api/printer/${encodeURIComponent(selectedPrinter)}`);
+                const response = await apiFetch(`/api/printer/${encodeURIComponent(selectedPrinter)}`);
                 
                 if (!response.ok) {
                     throw new Error(`HTTP ${response.status}`);
@@ -1595,8 +1604,8 @@
                 if (printerTrayInfo && printer) {
                     const trays = printer.trays || [];
                     if (trays && trays.length > 0) {
-                    const traysHtml = trays.map(tray => {
-                        let name = tray.name || tray.tray_name || 'Unknown';
+                    const traysHtml = trays.map((tray, index) => {
+                        let name = tray.name || tray.tray_name || `Tray ${index + 1}`;
                         let type = tray.type || tray.paper_type || 'Unknown';
                         let status = tray.status_en || tray.status_cn || tray.status || 'Unknown';
                         let mediaReady = tray.media_ready || tray.paper_size || 'Unknown';
@@ -1994,7 +2003,7 @@
 
         async function loadFiles() {
             try {
-                const response = await fetch('/api/files');
+                const response = await apiFetch('/api/files');
                 const data = await response.json();
                 const container = document.getElementById('filesList');
                 if (!container) return;
@@ -2023,7 +2032,7 @@
 
         async function selectFile(filename) {
             try {
-                const response = await fetch('/api/files');
+                const response = await apiFetch('/api/files');
                 const data = await response.json();
                 const file = data.files.find(f => f.filename === filename);
                 if (file) {
@@ -2059,7 +2068,7 @@
             }
 
             try {
-                const response = await fetch(`/api/files/${encodeURIComponent(filename)}`, {
+                const response = await apiFetch(`/api/files/${encodeURIComponent(filename)}`, {
                     method: 'DELETE'
                 });
                 const data = await response.json();
@@ -2090,7 +2099,7 @@
             });
 
             try {
-                const response = await fetch('/api/jobs');
+                const response = await apiFetch('/api/jobs');
                 const data = await response.json();
                 jobs = data.jobs || [];
                 const container = document.getElementById('jobsList');
@@ -2265,7 +2274,7 @@
             }
 
             try {
-                const response = await fetch(`/api/jobs/${jobId}`, {
+                const response = await apiFetch(`/api/jobs/${jobId}`, {
                     method: 'DELETE'
                 });
 
@@ -2306,7 +2315,7 @@
             }
 
             try {
-                const response = await fetch(`/api/jobs/${jobId}`, {
+                const response = await apiFetch(`/api/jobs/${jobId}`, {
                     method: 'DELETE'
                 });
 
