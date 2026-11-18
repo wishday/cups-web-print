@@ -2318,6 +2318,26 @@ def api_delete_file(filename):
     
     return _api_error('error.file_not_found', 404)
 
+@app.route('/api/files/<path:filename>/download', methods=['GET'])
+def api_download_file(filename):
+    """下载上传的原始文件"""
+    filename = os.path.basename(filename)
+    filepath = get_safe_path(app.config['UPLOAD_FOLDER'], filename)
+
+    if not filepath:
+        logger.warning(f"非法文件路径访问尝试: {filename}")
+        return _api_error('error.invalid_file_path', 403)
+
+    if not os.path.exists(filepath):
+        return _api_error('error.file_not_found', 404)
+
+    return send_from_directory(
+        app.config['UPLOAD_FOLDER'],
+        filename,
+        as_attachment=True,
+        download_name=filename
+    )
+
 def validate_page_range(page_range):
     """验证页面范围格式"""
     # 允许的格式：1, 1-5, 1-5 8, 1-5 8 10-12（空格分隔，不支持逗号）

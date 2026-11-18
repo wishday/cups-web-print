@@ -132,7 +132,7 @@
                                 <div class="flex items-center gap-2 flex-shrink-0 ml-auto">
                                     <a id="openPreviewInNewTab" href="#" target="_blank" rel="noopener noreferrer"
                                        class="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded whitespace-nowrap inline-flex items-center hidden">
-                                        Open in new tab
+                                        Open PDF in new window
                                     </a>
                                     <label for="fileInput" class="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded cursor-pointer whitespace-nowrap">
                                         Change
@@ -629,11 +629,12 @@
             const filesList = document.getElementById('filesList');
             if (filesList) {
                 filesList.addEventListener('click', (e) => {
-                    const btn = e.target.closest('button[data-action]');
+                    const btn = e.target.closest('[data-action]');
                     if (!btn) return;
                     const filename = decodeURIComponent(btn.dataset.filename);
                     if (btn.dataset.action === 'select') selectFile(filename);
                     if (btn.dataset.action === 'delete') deleteFile(filename);
+                    if (btn.dataset.action === 'download') downloadFile(filename);
                 });
             }
 
@@ -932,7 +933,7 @@
             }
         }
 
-        // Clear the header "Open in new tab" link so it never points to the previous file
+        // Clear the header "Open PDF in new window" link so it never points to the previous file
         function clearOpenPreviewLink() {
             const link = document.getElementById('openPreviewInNewTab');
             if (link) {
@@ -999,7 +1000,7 @@
                     previewContent.innerHTML = `
                         <div class="flex flex-col items-center justify-center h-full bg-gray-50 text-center px-4">
                             <p class="mb-2 text-gray-700 font-medium">Inline preview is not supported in this browser</p>
-                            <p class="mb-4 text-sm text-gray-500">Use “Open in new tab” above to view the PDF</p>
+                            <p class="mb-4 text-sm text-gray-500">Use “Open PDF in new window” above to view the PDF</p>
                         </div>
                     `;
                     return;
@@ -1052,7 +1053,7 @@
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
                             </svg>
                             <p class="mb-2 text-gray-700 font-medium">Your browser does not support embedded PDF preview</p>
-                            <p class="mb-4 text-sm text-gray-500">Use “Open in new tab” above, or switch to image preview</p>
+                            <p class="mb-4 text-sm text-gray-500">Use “Open PDF in new window” above, or switch to image preview</p>
                         </div>
                     </object>
                     ${fallbackButtons ? `<div class="flex flex-wrap gap-3 justify-center p-3 border-t border-gray-200 bg-white">${fallbackButtons}</div>` : ''}
@@ -1082,7 +1083,7 @@
                             hideLoading();
                             if (manualPdf) {
                                 // Manual switch back to PDF: don't auto-fallback, otherwise the button would bounce back to images
-                                showToast('PDF preview could not be displayed. Open it in a new tab or switch back to image preview', 'error');
+                                showToast('PDF preview could not be displayed. Open the PDF in a new window or switch back to image preview', 'error');
                             } else {
                                 loadFallbackImages();
                             }
@@ -1129,14 +1130,6 @@
             // 如果有预览图片，显示图片预览
             // 注意：currentPreviewImages 可能为空（上传时转换失败），此时显示提示信息
             if (currentPreviewImages && currentPreviewImages.length > 0) {
-                const firstImageUrl = `/api/preview/${encodeURIComponent(currentPreviewImages[0].filename)}`;
-                // Image mode: the header link opens the current image, matching what is shown
-                const openLink = document.getElementById('openPreviewInNewTab');
-                if (openLink) {
-                    openLink.href = firstImageUrl;
-                    openLink.classList.remove('hidden');
-                }
-
                 const canShowPdf = previewPdfAvailable && navigator.pdfViewerEnabled !== false;
 
                 let imagesHtml = '<div class="image-preview-container h-full bg-gray-50 relative flex flex-col">';
@@ -1916,11 +1909,13 @@
                 container.innerHTML = data.files.map(file => `
                     <div class="flex gap-3 p-3 bg-gray-50 rounded">
                         <div class="flex-1 min-w-0">
-                            <p class="text-sm font-medium text-gray-800 break-all">${escapeHtml(file.filename)}</p>
+                            <button type="button" data-action="select" data-filename="${encodeURIComponent(file.filename)}"
+                                    class="block w-full text-left text-sm font-medium text-gray-800 break-all hover:text-blue-600 hover:underline"
+                                    title="Click to select this file">${escapeHtml(file.filename)}</button>
                             <p class="text-xs text-gray-500 mt-1">${formatFileSize(file.size)}</p>
                         </div>
                         <div class="flex flex-col gap-1 flex-shrink-0">
-                            <button data-action="select" data-filename="${encodeURIComponent(file.filename)}" class="text-xs bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded transition whitespace-nowrap">Select</button>
+                            <button data-action="download" data-filename="${encodeURIComponent(file.filename)}" class="text-xs bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded transition whitespace-nowrap">Download</button>
                             <button data-action="delete" data-filename="${encodeURIComponent(file.filename)}" class="text-xs bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded transition whitespace-nowrap">Delete</button>
                         </div>
                     </div>
@@ -1960,6 +1955,15 @@
             } catch (error) {
                 console.error('选择文件失败:', error);
             }
+        }
+
+        function downloadFile(filename) {
+            const link = document.createElement('a');
+            link.href = `/api/files/${encodeURIComponent(filename)}/download`;
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
         }
 
         async function deleteFile(filename) {
