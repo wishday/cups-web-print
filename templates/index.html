@@ -132,7 +132,7 @@
                                 <div class="flex items-center gap-2 flex-shrink-0 ml-auto">
                                     <a id="openPreviewInNewTab" href="#" target="_blank" rel="noopener noreferrer"
                                        class="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded whitespace-nowrap inline-flex items-center hidden">
-                                        在新标签页打开
+                                        在新窗口打开PDF
                                     </a>
                                     <label for="fileInput" class="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded cursor-pointer whitespace-nowrap">
                                         更换
@@ -629,11 +629,12 @@
             const filesList = document.getElementById('filesList');
             if (filesList) {
                 filesList.addEventListener('click', (e) => {
-                    const btn = e.target.closest('button[data-action]');
+                    const btn = e.target.closest('[data-action]');
                     if (!btn) return;
                     const filename = decodeURIComponent(btn.dataset.filename);
                     if (btn.dataset.action === 'select') selectFile(filename);
                     if (btn.dataset.action === 'delete') deleteFile(filename);
+                    if (btn.dataset.action === 'download') downloadFile(filename);
                 });
             }
 
@@ -931,7 +932,7 @@
             }
         }
 
-        // 清空头部“在新标签页打开”链接，避免指向上一份文件
+        // 清空头部“在新窗口打开PDF”链接，避免指向上一份文件
         function clearOpenPreviewLink() {
             const link = document.getElementById('openPreviewInNewTab');
             if (link) {
@@ -998,7 +999,7 @@
                     previewContent.innerHTML = `
                         <div class="flex flex-col items-center justify-center h-full bg-gray-50 text-center px-4">
                             <p class="mb-2 text-gray-700 font-medium">当前浏览器不支持内嵌预览</p>
-                            <p class="mb-4 text-sm text-gray-500">可点击上方的“在新标签页打开”查看 PDF</p>
+                            <p class="mb-4 text-sm text-gray-500">可点击上方的“在新窗口打开PDF”查看 PDF</p>
                         </div>
                     `;
                     return;
@@ -1051,7 +1052,7 @@
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
                             </svg>
                             <p class="mb-2 text-gray-700 font-medium">您的浏览器不支持内嵌 PDF 预览</p>
-                            <p class="mb-4 text-sm text-gray-500">可点击上方的“在新标签页打开”，或切换为图片预览</p>
+                            <p class="mb-4 text-sm text-gray-500">可点击上方的“在新窗口打开PDF”，或切换为图片预览</p>
                         </div>
                     </object>
                     ${fallbackButtons ? `<div class="flex flex-wrap gap-3 justify-center p-3 border-t border-gray-200 bg-white">${fallbackButtons}</div>` : ''}
@@ -1081,7 +1082,7 @@
                             hideLoading();
                             if (manualPdf) {
                                 // 手动切回 PDF 时失败不再自动降级，避免按钮点击后又被切回图片
-                                showToast('PDF 预览无法显示，请用上方“在新标签页打开”查看，或切回图片预览', 'error');
+                                showToast('PDF 预览无法显示，请用上方“在新窗口打开PDF”查看，或切回图片预览', 'error');
                             } else {
                                 loadFallbackImages();
                             }
@@ -1128,14 +1129,6 @@
             // 如果有预览图片，显示图片预览
             // 注意：currentPreviewImages 可能为空（上传时转换失败），此时显示提示信息
             if (currentPreviewImages && currentPreviewImages.length > 0) {
-                const firstImageUrl = `/api/preview/${encodeURIComponent(currentPreviewImages[0].filename)}`;
-                // 图片模式下头部链接改为打开当前图片，保持与新标签内容一致
-                const openLink = document.getElementById('openPreviewInNewTab');
-                if (openLink) {
-                    openLink.href = firstImageUrl;
-                    openLink.classList.remove('hidden');
-                }
-
                 const canShowPdf = previewPdfAvailable && navigator.pdfViewerEnabled !== false;
 
                 let imagesHtml = '<div class="image-preview-container h-full bg-gray-50 relative flex flex-col">';
@@ -1915,11 +1908,13 @@
                 container.innerHTML = data.files.map(file => `
                     <div class="flex gap-3 p-3 bg-gray-50 rounded">
                         <div class="flex-1 min-w-0">
-                            <p class="text-sm font-medium text-gray-800 break-all">${escapeHtml(file.filename)}</p>
+                            <button type="button" data-action="select" data-filename="${encodeURIComponent(file.filename)}"
+                                    class="block w-full text-left text-sm font-medium text-gray-800 break-all hover:text-blue-600 hover:underline"
+                                    title="点击选择该文件">${escapeHtml(file.filename)}</button>
                             <p class="text-xs text-gray-500 mt-1">${formatFileSize(file.size)}</p>
                         </div>
                         <div class="flex flex-col gap-1 flex-shrink-0">
-                            <button data-action="select" data-filename="${encodeURIComponent(file.filename)}" class="text-xs bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded transition whitespace-nowrap">选择</button>
+                            <button data-action="download" data-filename="${encodeURIComponent(file.filename)}" class="text-xs bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded transition whitespace-nowrap">下载</button>
                             <button data-action="delete" data-filename="${encodeURIComponent(file.filename)}" class="text-xs bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded transition whitespace-nowrap">删除</button>
                         </div>
                     </div>
@@ -1959,6 +1954,15 @@
             } catch (error) {
                 console.error('选择文件失败:', error);
             }
+        }
+
+        function downloadFile(filename) {
+            const link = document.createElement('a');
+            link.href = `/api/files/${encodeURIComponent(filename)}/download`;
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
         }
 
         async function deleteFile(filename) {

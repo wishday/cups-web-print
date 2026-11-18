@@ -149,10 +149,27 @@ jobs:
         run: |
           PKG=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]')
           OWNER="${{ github.repository_owner }}"
+          REPO_LOWER=$(echo "${IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')
+
+          # 先匿名拉取 manifest 判断包是否已公开：公开返回 200，私有返回 401/403。
+          # 已公开时直接跳过，避免 GITHUB_TOKEN 无组织包管理权限时 PATCH 返回 404。
+          PULL_TOKEN=$(curl -fsS "https://ghcr.io/token?scope=repository:${REPO_LOWER}:pull&service=ghcr.io" 2>/dev/null | jq -r '.token // empty' || true)
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${PULL_TOKEN}" \
+            -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json" \
+            "https://ghcr.io/v2/${REPO_LOWER}/manifests/latest")
+          if [ "${CODE}" = "200" ]; then
+            echo "$PKG 已是 public，跳过"
+            exit 0
+          fi
+
           if gh api "/users/$OWNER" --jq .type | grep -qx Organization; then
             API="/orgs/$OWNER/packages/container/$PKG"
           else
             API="/user/packages/container/$PKG"
           fi
-          gh api --method PATCH "$API" -f visibility=public
-          echo "已设置 $PKG 为 public"
+          if gh api --method PATCH "$API" -f visibility=public 2>/dev/null; then
+            echo "已设置 $PKG 为 public"
+          else
+            echo "::warning::无法自动设置 $PKG 为 public（可能权限不足），镜像已推送，可忽略"
+          fi
